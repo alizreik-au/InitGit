@@ -1,0 +1,9 @@
+#!/bin/sh
+# Push all LFS objects to the remote before the normal push (avoids "push succeeded but LFS didn't upload").
+remote="$1"
+git lfs push "$remote" --all || exit 1
+# Run original LFS pre-push hook if it was preserved during setup
+if [ -f .git/hooks/pre-push.lfs ]; then
+  exec sh .git/hooks/pre-push.lfs "$@"
+fi
+exit 0
