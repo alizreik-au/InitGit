@@ -122,7 +122,11 @@ $regPath = $InstallDir -replace '\\', '\\\\'
 $regContent = @"
 Windows Registry Editor Version 5.00
 
-; "Clone and init repo" - right-click a folder or background inside a folder
+; Ensure double-click on folder opens it (default verb = open); our entry is extra context menu only.
+[HKEY_CLASSES_ROOT\Folder\shell]
+@="open"
+
+; "Clone and init repo" - right-click a folder or background inside a folder (Show more options on Win11)
 
 [HKEY_CLASSES_ROOT\Folder\shell\InitGit_CloneAndInit]
 @="Clone and init repo"
@@ -142,6 +146,18 @@ Windows Registry Editor Version 5.00
 $regFile = Join-Path -Path $InstallDir -ChildPath 'Add_InitGit_Context_Menu.reg'
 Set-Content -LiteralPath $regFile -Value $regContent -Encoding ASCII
 Write-Host "  Created: Add_InitGit_Context_Menu.reg (points to $InstallDir)" -ForegroundColor Green
+
+# Standalone fix: restore double-click = open folder (run this if clicking a folder ran the script instead of opening)
+$fixFolderOpenReg = @"
+Windows Registry Editor Version 5.00
+
+; Restore default: double-click on a folder opens it (does not run InitGit).
+[HKEY_CLASSES_ROOT\Folder\shell]
+@="open"
+"@
+$fixFolderOpenFile = Join-Path -Path $InstallDir -ChildPath 'Fix-Folder-Open.reg'
+Set-Content -LiteralPath $fixFolderOpenFile -Value $fixFolderOpenReg -Encoding ASCII
+Write-Host "  Created: Fix-Folder-Open.reg (merge if double-click on folder runs script instead of opening)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green

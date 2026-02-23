@@ -1,16 +1,105 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Clones a Git repository and initializes it with InitGit scripts (merge driver, LFS hooks, docs).
+    Clones a Git repository and initializes it with InitGit scripts (merge driver, LFS hooks, .gitignore, .gitattributes).
 .DESCRIPTION
-    Prompts for (or accepts) a repo URL, clones into the given parent directory, copies scripts
-    and docs from this installation into the clone, and runs setup-merge-driver.bat.
+    Prompts for (or accepts) a repo URL, clones into the given parent directory, then generates
+    .gitignore, .gitattributes, scripts (merge-theirs, setup-merge-driver), and Git hooks (post-merge, pre-push)
+    in the clone. No dependency on external scripts or templates folders.
 #>
 
 $ErrorActionPreference = "Stop"
 
 # Dot-source shared helpers (used by tests as well)
 . (Join-Path -Path $PSScriptRoot -ChildPath 'CloneAndInitLib.ps1')
+
+# Embedded content: generated into the clone so the script is self-contained
+$script:GitignoreContent = @"
+Binaries
+DerivedDataCache
+Intermediate
+Saved
+.vscode
+.vs
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.sln
+*.suo
+*.xcodeproj
+*.xcworkspace
+"@
+
+$script:GitattributesContent = @"
+content/** filter=lfs diff=lfs merge=lfs -text
+import/** filter=lfs diff=lfs merge=lfs -text
+plugin/** filter=lfs diff=lfs merge=lfs -text
+*.fbx filter=lfs diff=lfs merge=lfs -text
+*.uasset filter=lfs diff=lfs merge=lfs -text
+"@
+
+$script:MergeTheirsBatContent = @"
+@echo off
+REM Git merge driver: keep "theirs" (incoming) version. Args: %P %O %A %B -> copy %B to %A
+REM /B = binary copy (required; default copy would treat as text and corrupt .uasset / LFS)
+copy /B /Y "%~4" "%~3" >nul
+exit /b 0
+"@
+
+$script:PrePushHookContent = @'
+#!/bin/sh
+# Push all LFS objects to the remote before the normal push (avoids "push succeeded but LFS didn't upload").
+remote="$1"
+git lfs push "$remote" --all || exit 1
+# Run original LFS pre-push hook if it was preserved during setup
+if [ -f .git/hooks/pre-push.lfs ]; then
+  exec sh .git/hooks/pre-push.lfs "$@"
+fi
+exit 0
+'@
+
+$script:SetupMergeDriverBatContent = @"
+@echo off
+REM One-time setup after clone: configures the "theirs" merge driver and post-merge LFS pull.
+REM Run from repo root: scripts\setup-merge-driver.bat
+
+set DRIVER_CMD=scripts/merge-theirs.bat
+git config merge.theirs.driver "%DRIVER_CMD%"
+if %ERRORLEVEL% neq 0 (
+  echo Failed to set merge driver.
+  exit /b 1
+)
+echo Merge driver "theirs" configured. .uasset conflicts will keep the incoming branch version.
+
+REM Ensure post-merge hook runs "git lfs pull" so pointer files become real binaries after merge.
+set HOOK=.git\hooks\post-merge
+if not exist "%HOOK%" (
+  echo #!/bin/sh > "%HOOK%"
+  echo git lfs pull >> "%HOOK%"
+  echo Post-merge hook created: will run "git lfs pull" after every merge.
+) else (
+  findstr /C:"git lfs pull" "%HOOK%" >nul 2>&1
+  if %ERRORLEVEL% neq 0 (
+    echo. >> "%HOOK%"
+    echo git lfs pull >> "%HOOK%"
+    echo Post-merge hook updated: will run "git lfs pull" after every merge.
+  ) else (
+    echo Post-merge hook already runs "git lfs pull".
+  )
+)
+
+REM Ensure pre-push hook runs "git lfs push REMOTE --all" so LFS objects are always uploaded when pushing.
+set PREPUSH=.git\hooks\pre-push
+findstr /C:"git lfs push" "%PREPUSH%" >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+  if exist "%PREPUSH%" copy /Y "%PREPUSH%" ".git\hooks\pre-push.lfs" >nul
+  copy /Y "scripts\hooks\pre-push" "%PREPUSH%" >nul
+  echo Pre-push hook installed: will run "git lfs push REMOTE --all" before every push.
+) else (
+  echo Pre-push hook already runs "git lfs push".
+)
+"@
 
 function Get-RepositoryUrl {
     param([string]$DefaultUrl = "")
@@ -74,17 +163,6 @@ try {
     }
     $url = $url.Trim()
 
-    # Paths relative to this script (works from repo or from %LOCALAPPDATA%\InitGit)
-    $scriptRoot = $PSScriptRoot
-    $scriptsSource = Join-Path -Path $scriptRoot -ChildPath 'scripts'
-    $docsSource = Join-Path -Path $scriptRoot -ChildPath 'docs'
-
-    if (-not (Test-Path -LiteralPath $scriptsSource -PathType Container)) {
-        Write-Host "Scripts folder not found: $scriptsSource" -ForegroundColor Red
-        pause
-        exit 1
-    }
-
     Write-Host "Clone and init" -ForegroundColor Cyan
     Write-Host "===============" -ForegroundColor Cyan
     Write-Host "Repository: $url"
@@ -119,41 +197,47 @@ try {
         exit 1
     }
 
-    # Copy scripts and docs into the clone
-    $scriptsDest = Join-Path -Path $clonePath -ChildPath 'scripts'
-    $docsDest = Join-Path -Path $clonePath -ChildPath 'docs'
+    # Generate .gitignore and .gitattributes in the clone
+    Set-Content -LiteralPath (Join-Path -Path $clonePath -ChildPath '.gitignore') -Value $GitignoreContent -Encoding UTF8
+    Write-Host "  Generated: .gitignore" -ForegroundColor Green
+    Set-Content -LiteralPath (Join-Path -Path $clonePath -ChildPath '.gitattributes') -Value $GitattributesContent -Encoding UTF8
+    Write-Host "  Generated: .gitattributes" -ForegroundColor Green
 
-    if (-not (Test-Path -LiteralPath $scriptsDest -PathType Container)) {
-        New-Item -Path $scriptsDest -ItemType Directory -Force | Out-Null
-    }
-    Copy-Item -LiteralPath (Join-Path -Path $scriptsSource -ChildPath '*') -Destination $scriptsDest -Recurse -Force
-    Write-Host "  Copied: scripts -> $clonePath\scripts" -ForegroundColor Green
+    # Generate scripts folder: merge-theirs.bat, setup-merge-driver.bat, hooks/pre-push
+    $scriptsDir = Join-Path -Path $clonePath -ChildPath 'scripts'
+    $hooksDir = Join-Path -Path $scriptsDir -ChildPath 'hooks'
+    New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
+    New-Item -Path $hooksDir -ItemType Directory -Force | Out-Null
 
-    if (Test-Path -LiteralPath $docsSource -PathType Container) {
-        if (-not (Test-Path -LiteralPath $docsDest -PathType Container)) {
-            New-Item -Path $docsDest -ItemType Directory -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path -Path $scriptsDir -ChildPath 'merge-theirs.bat') -Value $MergeTheirsBatContent -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path -Path $scriptsDir -ChildPath 'setup-merge-driver.bat') -Value $SetupMergeDriverBatContent -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path -Path $hooksDir -ChildPath 'pre-push') -Value $PrePushHookContent -Encoding ASCII -NoNewline:$false
+    Write-Host "  Generated: scripts\merge-theirs.bat, scripts\setup-merge-driver.bat, scripts\hooks\pre-push" -ForegroundColor Green
+
+    # Git LFS and merge driver / hooks
+    Push-Location -LiteralPath $clonePath
+    try {
+        git lfs install
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Warning: git lfs install failed. LFS may not be active." -ForegroundColor Yellow
         }
-        Copy-Item -LiteralPath (Join-Path -Path $docsSource -ChildPath '*') -Destination $docsDest -Recurse -Force
-        Write-Host "  Copied: docs -> $clonePath\docs" -ForegroundColor Green
-    }
 
-    # Run setup-merge-driver in the clone
-    $setupBat = Join-Path -Path $clonePath -ChildPath 'scripts\setup-merge-driver.bat'
-    if (Test-Path -LiteralPath $setupBat -PathType Leaf) {
-        Write-Host "Running merge driver and hooks setup..."
-        Push-Location -LiteralPath $clonePath
-        try {
-            & cmd /c "`"$setupBat`""
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Setup reported an error. Check $clonePath\scripts\setup-merge-driver.bat" -ForegroundColor Yellow
-            } else {
-                Write-Host "  Setup complete: merge driver and LFS hooks configured." -ForegroundColor Green
-            }
-        } finally {
-            Pop-Location
+        git config merge.theirs.driver "scripts/merge-theirs.bat"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Warning: failed to set merge driver." -ForegroundColor Yellow
+        } else {
+            Write-Host "  Configured: merge driver 'theirs'" -ForegroundColor Green
         }
-    } else {
-        Write-Host "  setup-merge-driver.bat not found; skipping merge driver setup." -ForegroundColor Yellow
+
+        $gitDir = Join-Path -Path $clonePath -ChildPath '.git'
+        $postMergeHook = Join-Path -Path $gitDir -ChildPath 'hooks\post-merge'
+        $prePushHook = Join-Path -Path $gitDir -ChildPath 'hooks\pre-push'
+        $postMergeContent = "#!/bin/sh`ngit lfs pull"
+        Set-Content -LiteralPath $postMergeHook -Value $postMergeContent -Encoding ASCII -NoNewline:$false
+        Copy-Item -LiteralPath (Join-Path -Path $hooksDir -ChildPath 'pre-push') -Destination $prePushHook -Force
+        Write-Host "  Generated: .git/hooks/post-merge, .git/hooks/pre-push (LFS pull/push)" -ForegroundColor Green
+    } finally {
+        Pop-Location
     }
 
     Write-Host ""
