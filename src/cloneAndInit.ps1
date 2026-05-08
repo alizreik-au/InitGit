@@ -10,96 +10,8 @@
 
 $ErrorActionPreference = "Stop"
 
-# Dot-source shared helpers (used by tests as well)
+# Dot-source shared helpers and content (used by tests as well)
 . (Join-Path -Path $PSScriptRoot -ChildPath 'CloneAndInitLib.ps1')
-
-# Embedded content: generated into the clone so the script is self-contained
-$script:GitignoreContent = @"
-Binaries
-DerivedDataCache
-Intermediate
-Saved
-.vscode
-.vs
-*.VC.db
-*.opensdf
-*.opendb
-*.sdf
-*.sln
-*.suo
-*.xcodeproj
-*.xcworkspace
-"@
-
-$script:GitattributesContent = @"
-content/** filter=lfs diff=lfs merge=lfs -text
-import/** filter=lfs diff=lfs merge=lfs -text
-plugin/** filter=lfs diff=lfs merge=lfs -text
-*.fbx filter=lfs diff=lfs merge=lfs -text
-*.uasset filter=lfs diff=lfs merge=lfs -text
-"@
-
-$script:MergeTheirsBatContent = @"
-@echo off
-REM Git merge driver: keep "theirs" (incoming) version. Args: %P %O %A %B -> copy %B to %A
-REM /B = binary copy (required; default copy would treat as text and corrupt .uasset / LFS)
-copy /B /Y "%~4" "%~3" >nul
-exit /b 0
-"@
-
-$script:PrePushHookContent = @'
-#!/bin/sh
-# Push all LFS objects to the remote before the normal push (avoids "push succeeded but LFS didn't upload").
-remote="$1"
-git lfs push "$remote" --all || exit 1
-# Run original LFS pre-push hook if it was preserved during setup
-if [ -f .git/hooks/pre-push.lfs ]; then
-  exec sh .git/hooks/pre-push.lfs "$@"
-fi
-exit 0
-'@
-
-$script:SetupMergeDriverBatContent = @"
-@echo off
-REM One-time setup after clone: configures the "theirs" merge driver and post-merge LFS pull.
-REM Run from repo root: scripts\setup-merge-driver.bat
-
-set DRIVER_CMD=scripts/merge-theirs.bat
-git config merge.theirs.driver "%DRIVER_CMD%"
-if %ERRORLEVEL% neq 0 (
-  echo Failed to set merge driver.
-  exit /b 1
-)
-echo Merge driver "theirs" configured. .uasset conflicts will keep the incoming branch version.
-
-REM Ensure post-merge hook runs "git lfs pull" so pointer files become real binaries after merge.
-set HOOK=.git\hooks\post-merge
-if not exist "%HOOK%" (
-  echo #!/bin/sh > "%HOOK%"
-  echo git lfs pull >> "%HOOK%"
-  echo Post-merge hook created: will run "git lfs pull" after every merge.
-) else (
-  findstr /C:"git lfs pull" "%HOOK%" >nul 2>&1
-  if %ERRORLEVEL% neq 0 (
-    echo. >> "%HOOK%"
-    echo git lfs pull >> "%HOOK%"
-    echo Post-merge hook updated: will run "git lfs pull" after every merge.
-  ) else (
-    echo Post-merge hook already runs "git lfs pull".
-  )
-)
-
-REM Ensure pre-push hook runs "git lfs push REMOTE --all" so LFS objects are always uploaded when pushing.
-set PREPUSH=.git\hooks\pre-push
-findstr /C:"git lfs push" "%PREPUSH%" >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-  if exist "%PREPUSH%" copy /Y "%PREPUSH%" ".git\hooks\pre-push.lfs" >nul
-  copy /Y "scripts\hooks\pre-push" "%PREPUSH%" >nul
-  echo Pre-push hook installed: will run "git lfs push REMOTE --all" before every push.
-) else (
-  echo Pre-push hook already runs "git lfs push".
-)
-"@
 
 function Get-RepositoryUrl {
     param([string]$DefaultUrl = "")
@@ -138,6 +50,71 @@ function Get-RepositoryUrl {
     return $null
 }
 
+function Select-RemoteBranch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Branches
+    )
+
+    Add-Type -AssemblyName PresentationFramework
+
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Clone and init - Select branch" Height="520" Width="980" WindowStartupLocation="CenterScreen"
+        Background="#F0F0F0" ResizeMode="CanResize">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="Select a remote branch to clone. Branches are ordered by most recent commit." FontSize="16" Margin="0,0,0,12"/>
+        <ListView x:Name="BranchListView" Grid.Row="1" Margin="0,0,0,12">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="Branch" Width="240" DisplayMemberBinding="{Binding BranchName}" />
+                    <GridViewColumn Header="Last Commit" Width="150" DisplayMemberBinding="{Binding CommitDateText}" />
+                    <GridViewColumn Header="Author" Width="160" DisplayMemberBinding="{Binding AuthorName}" />
+                    <GridViewColumn Header="Subject" Width="380" DisplayMemberBinding="{Binding Subject}" />
+                </GridView>
+            </ListView.View>
+        </ListView>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="Cancel" Width="100" Margin="0,0,8,0" Padding="12,6"/>
+            <Button x:Name="SelectButton" Content="Clone branch" Width="120" Padding="12,6" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+
+    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+
+    $branchListView = $window.FindName("BranchListView")
+    $selectButton = $window.FindName("SelectButton")
+    $cancelButton = $window.FindName("CancelButton")
+
+    $branchListView.ItemsSource = $Branches
+    if ($Branches.Count -gt 0) {
+        $branchListView.SelectedIndex = 0
+    }
+
+    $branchListView.Add_MouseDoubleClick({
+        if ($branchListView.SelectedItem) {
+            $window.DialogResult = $true
+        }
+    })
+    $selectButton.Add_Click({ $window.DialogResult = $true })
+    $cancelButton.Add_Click({ $window.DialogResult = $false })
+
+    $result = $window.ShowDialog()
+    if ($result -and $branchListView.SelectedItem) {
+        return $branchListView.SelectedItem
+    }
+    return $null
+}
+
 try {
     # Parent directory: from argument (context menu) or current location
     $parentDir = if ($args.Length -gt 0) { $args[0] } else { (Get-Location).Path }
@@ -163,9 +140,29 @@ try {
     }
     $url = $url.Trim()
 
+    Write-Host "Loading remote branches..."
+    $remoteBranches = Get-RemoteBranchInfo -RepositoryUrl $url
+    if (-not $remoteBranches -or $remoteBranches.Count -eq 0) {
+        Write-Host "No remote branches found for: $url" -ForegroundColor Red
+        pause
+        exit 1
+    }
+
+    $selectedBranch = if ($args.Length -gt 2) {
+        $remoteBranches | Where-Object { $_.BranchName -eq $args[2] } | Select-Object -First 1
+    } else {
+        Select-RemoteBranch -Branches $remoteBranches
+    }
+    if (-not $selectedBranch) {
+        Write-Host "No branch selected. Exiting." -ForegroundColor Yellow
+        pause
+        exit 1
+    }
+
     Write-Host "Clone and init" -ForegroundColor Cyan
     Write-Host "===============" -ForegroundColor Cyan
     Write-Host "Repository: $url"
+    Write-Host "Branch: $($selectedBranch.BranchName)"
     Write-Host "Parent directory: $parentDir"
     Write-Host ""
 
@@ -173,7 +170,7 @@ try {
     Write-Host "Cloning repository..."
     Push-Location -LiteralPath $parentDir
     try {
-        git clone $url
+        git clone --branch $selectedBranch.BranchName --single-branch $url
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Clone failed." -ForegroundColor Red
             pause

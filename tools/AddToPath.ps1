@@ -9,12 +9,14 @@ if (-not $isAdmin) {
 }
 # Get the directory where the script is located
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
+$sourceScriptsDir = Join-Path $repoRoot "src"
 Write-Host "Script directory: $scriptDir"
 
 $batFile = Join-Path $env:SystemRoot "System32\initGit.bat"
 Write-Host "Checking for initGit.bat at path: $batFile"
 
-$sourceBatFile = Join-Path $scriptDir "initGit.bat"
+$sourceBatFile = Join-Path $sourceScriptsDir "initGit.bat"
 $destBatFile = Join-Path $env:SystemRoot "System32\initGit.bat"
 
 Write-Host "Source bat file path: $sourceBatFile"
@@ -59,7 +61,7 @@ if (Test-Path $destBatFile) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Set source and destination paths
-$sourceFile = Join-Path $scriptDir "initGit.ps1"
+$sourceFile = Join-Path $sourceScriptsDir "initGit.ps1"
 $destDir = $env:SystemRoot + "\System32"
 $destFile = Join-Path $destDir "initGit.ps1"
 
@@ -75,7 +77,7 @@ if (Test-Path $sourceFile) {
     }
 }
 else {
-    Write-Host "initGit.ps1 not found in $scriptDir"
+    Write-Host "initGit.ps1 not found in $sourceScriptsDir"
 }
 
 Write-Host "Finished!"

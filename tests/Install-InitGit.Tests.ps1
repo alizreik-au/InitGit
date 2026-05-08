@@ -24,12 +24,15 @@ Describe 'Install-InitGit script structure' {
     It 'Reg content template uses double backslashes for path' {
         $content = Get-Content -LiteralPath $installScript -Raw
         $content | Should Match '\\\\RunCloneAndInit\.bat'
+        $content | Should Match '\\\\RunReInitRepo\.bat'
     }
 
     It 'Reg content contains Folder and Directory\Background shell keys' {
         $content = Get-Content -LiteralPath $installScript -Raw
         $content | Should Match 'Folder\\shell\\InitGit_CloneAndInit'
         $content | Should Match 'Directory\\Background\\shell\\InitGit_CloneAndInit'
+        $content | Should Match 'Folder\\shell\\InitGit_ReInitRepo'
+        $content | Should Match 'Directory\\Background\\shell\\InitGit_ReInitRepo'
     }
 }
 
@@ -54,6 +57,7 @@ Describe 'Install-InitGit execution' {
         Test-Path -LiteralPath (Join-Path $installDir 'cloneAndInit.ps1') -PathType Leaf | Should Be $true
         Test-Path -LiteralPath (Join-Path $installDir 'CloneAndInitLib.ps1') -PathType Leaf | Should Be $true
         Test-Path -LiteralPath (Join-Path $installDir 'RunCloneAndInit.bat') -PathType Leaf | Should Be $true
+        Test-Path -LiteralPath (Join-Path $installDir 'RunReInitRepo.bat') -PathType Leaf | Should Be $true
         Test-Path -LiteralPath (Join-Path $installDir 'Add_InitGit_Context_Menu.reg') -PathType Leaf | Should Be $true
         Test-Path -LiteralPath (Join-Path $installDir 'scripts') -PathType Container | Should Be $true
         Test-Path -LiteralPath (Join-Path $installDir 'docs') -PathType Container | Should Be $true
@@ -77,6 +81,8 @@ Describe 'Install-InitGit execution' {
         $expectedPath = $testLocalAppData -replace '\\', '\\\\'
         $regContent | Should Match ([regex]::Escape($expectedPath))
         $regContent | Should Match 'RunCloneAndInit\.bat'
+        $regContent | Should Match 'RunReInitRepo\.bat'
         $regContent | Should Match 'InitGit_CloneAndInit'
+        $regContent | Should Match 'InitGit_ReInitRepo'
     }
 }

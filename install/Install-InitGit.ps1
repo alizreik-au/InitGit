@@ -8,7 +8,8 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$script:SourceDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$script:SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$script:ScriptsSourceDir = Join-Path -Path $SourceRoot -ChildPath 'src'
 $InstallDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'InitGit'
 
 # What to copy: main scripts + scripts folder + docs folder
@@ -17,6 +18,10 @@ $CopyMap = @(
     @{ Src = 'initGit.bat'; Dest = 'initGit.bat' },
     @{ Src = 'cloneAndInit.ps1'; Dest = 'cloneAndInit.ps1' },
     @{ Src = 'cloneAndInit.bat'; Dest = 'cloneAndInit.bat' },
+    @{ Src = 'updateRepo.ps1'; Dest = 'updateRepo.ps1' },
+    @{ Src = 'updateRepo.bat'; Dest = 'updateRepo.bat' },
+    @{ Src = 'reInitRepo.ps1'; Dest = 'reInitRepo.ps1' },
+    @{ Src = 'reInitRepo.bat'; Dest = 'reInitRepo.bat' },
     @{ Src = 'CloneAndInitLib.ps1'; Dest = 'CloneAndInitLib.ps1' }
 )
 
@@ -25,8 +30,8 @@ Write-Host "=================" -ForegroundColor Cyan
 Write-Host "Install/update to: $InstallDir" -ForegroundColor White
 Write-Host ""
 
-if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
-    Write-Error "Source directory not found: $SourceDir"
+if (-not (Test-Path -LiteralPath $ScriptsSourceDir -PathType Container)) {
+    Write-Error "Source directory not found: $ScriptsSourceDir"
     exit 1
 }
 
@@ -40,7 +45,7 @@ if (Test-Path -LiteralPath $InstallDir -PathType Container) {
 }
 
 foreach ($entry in $CopyMap) {
-    $src = Join-Path -Path $SourceDir -ChildPath $entry.Src
+    $src = Join-Path -Path $ScriptsSourceDir -ChildPath $entry.Src
     if (Test-Path -LiteralPath $src -PathType Leaf) {
         $dest = Join-Path -Path $InstallDir -ChildPath $entry.Dest
         Copy-Item -LiteralPath $src -Destination $dest -Force
@@ -51,8 +56,8 @@ foreach ($entry in $CopyMap) {
 }
 
 # Copy scripts and docs folders
-$scriptsSrc = Join-Path -Path $SourceDir -ChildPath 'scripts'
-$docsSrc = Join-Path -Path $SourceDir -ChildPath 'docs'
+$scriptsSrc = Join-Path -Path $SourceRoot -ChildPath 'scripts'
+$docsSrc = Join-Path -Path $SourceRoot -ChildPath 'docs'
 $scriptsDest = Join-Path -Path $InstallDir -ChildPath 'scripts'
 $docsDest = Join-Path -Path $InstallDir -ChildPath 'docs'
 
@@ -92,17 +97,47 @@ if errorlevel 1 pause
 Set-Content -LiteralPath (Join-Path $InstallDir 'RunMe.bat') -Value $batRunMe -Encoding ASCII
 Write-Host "  Created: RunMe.bat (Clone and init - prompts for URL and folder)" -ForegroundColor Green
 
+# Launcher: Update repo to InitGit from context menu (folder path = %1 or %V)
+$batRunUpdateRepo = @"
+@echo off
+cd /d "%~dp0"
+set "FOLDER=%~1"
+if "%FOLDER%"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0updateRepo.ps1"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0updateRepo.ps1" "%FOLDER%"
+)
+if errorlevel 1 pause
+"@
+Set-Content -LiteralPath (Join-Path $InstallDir 'RunUpdateRepo.bat') -Value $batRunUpdateRepo -Encoding ASCII
+Write-Host "  Created: RunUpdateRepo.bat" -ForegroundColor Green
+
+# Launcher: Initialize copied folder that does not have .git yet
+$batRunReInitRepo = @"
+@echo off
+cd /d "%~dp0"
+set "FOLDER=%~1"
+if "%FOLDER%"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0reInitRepo.ps1"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0reInitRepo.ps1" "%FOLDER%"
+)
+if errorlevel 1 pause
+"@
+Set-Content -LiteralPath (Join-Path $InstallDir 'RunReInitRepo.bat') -Value $batRunReInitRepo -Encoding ASCII
+Write-Host "  Created: RunReInitRepo.bat" -ForegroundColor Green
+
 # Add context menu .bat - merge the reg file (UAC)
 $batAddContext = @"
 @echo off
 set "REGFILE=%LOCALAPPDATA%\InitGit\Add_InitGit_Context_Menu.reg"
 if not exist "%REGFILE%" (
     echo Add_InitGit_Context_Menu.reg not found at %REGFILE%
-    echo Run Install-InitGit first to install and create the reg file.
+    echo Run "Install InitGit.bat" from the repo root first to install and create the reg file.
     pause
     exit /b 1
 )
-echo Adding "Clone and init repo" to folder context menu...
+echo Adding InitGit context menu entries (Clone and init repo, Update repo to InitGit, Init copied folder)...
 echo You may be prompted for Administrator approval.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'reg.exe' -ArgumentList 'import', \"\"\"%REGFILE%\"\"\" -Verb RunAs -Wait"
 if errorlevel 1 (
@@ -111,7 +146,7 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Done.
-echo On Windows 11: right-click a folder (or empty area), then "Show more options" to see "Clone and init repo".
+echo On Windows 11: right-click a folder (or empty area), then "Show more options" to see "Clone and init repo", "Update repo to InitGit", and "Init copied folder".
 pause
 "@
 Set-Content -LiteralPath (Join-Path $InstallDir 'Add-InitGit-Context-Menu.bat') -Value $batAddContext -Encoding ASCII
@@ -142,6 +177,40 @@ Windows Registry Editor Version 5.00
 
 [HKEY_CLASSES_ROOT\Directory\Background\shell\InitGit_CloneAndInit\command]
 @="\"$regPath\\\\RunCloneAndInit.bat\" \"%V\""
+
+; "Update repo to InitGit" - right-click a folder (repo root or inside repo) or background
+
+[HKEY_CLASSES_ROOT\Folder\shell\InitGit_UpdateRepo]
+@="Update repo to InitGit"
+"Icon"="C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
+
+[HKEY_CLASSES_ROOT\Folder\shell\InitGit_UpdateRepo\command]
+@="\"$regPath\\\\RunUpdateRepo.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\InitGit_UpdateRepo]
+@="Update repo to InitGit"
+"Icon"="C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
+"NoWorkingDirectory"=""
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\InitGit_UpdateRepo\command]
+@="\"$regPath\\\\RunUpdateRepo.bat\" \"%V\""
+
+; "Init copied folder" - right-click a non-git folder or background
+
+[HKEY_CLASSES_ROOT\Folder\shell\InitGit_ReInitRepo]
+@="Init copied folder"
+"Icon"="C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
+
+[HKEY_CLASSES_ROOT\Folder\shell\InitGit_ReInitRepo\command]
+@="\"$regPath\\\\RunReInitRepo.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\InitGit_ReInitRepo]
+@="Init copied folder"
+"Icon"="C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"
+"NoWorkingDirectory"=""
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\InitGit_ReInitRepo\command]
+@="\"$regPath\\\\RunReInitRepo.bat\" \"%V\""
 "@
 $regFile = Join-Path -Path $InstallDir -ChildPath 'Add_InitGit_Context_Menu.reg'
 Set-Content -LiteralPath $regFile -Value $regContent -Encoding ASCII
@@ -182,7 +251,9 @@ if ($addContext -ne 'n' -and $addContext -ne 'N') {
 Write-Host ""
 Write-Host "Installed location: $InstallDir" -ForegroundColor Cyan
 Write-Host "  - Clone and init (prompt): RunMe.bat or RunCloneAndInit.bat" -ForegroundColor Gray
+Write-Host "  - Init copied folder with no git: reInitRepo.bat or right-click folder -> Init copied folder" -ForegroundColor Gray
 Write-Host "  - Init existing folder: initGit.bat (run from that folder)" -ForegroundColor Gray
+Write-Host "  - Update existing repo to InitGit: updateRepo.bat or right-click folder -> Update repo to InitGit" -ForegroundColor Gray
 Write-Host "  - Re-add context menu: Add-InitGit-Context-Menu.bat" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Windows 11: The entry appears under 'Show more options' when you right-click a folder." -ForegroundColor Yellow

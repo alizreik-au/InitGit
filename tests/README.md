@@ -11,7 +11,7 @@ Pester tests for CloneAndInit and Install-InitGit. Compatible with Pester 3 (Win
 From the repo root:
 
 ```cmd
-run-tests.bat
+tests\Run-Tests.bat
 ```
 
 This runs PowerShell with `-ExecutionPolicy Bypass` so the test scripts load.
