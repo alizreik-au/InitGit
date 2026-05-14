@@ -294,7 +294,7 @@ if ($prereq) {
         if ($doInstall -and $wingetOk) {
             Invoke-InitGitWingetInstallMissing -NeedGit:(-not $prereq.GitPresent) -NeedLfs:(-not $prereq.LfsPresent) -NeedGcm:(-not $prereq.GcmPresent)
             Update-InitGitSessionPathFromMachine
-            Show-InitGitInstallerMessage -Message 'winget installs finished (or were cancelled). If anything still fails, close this window, open a new PowerShell, and run the installer again.'
+            Write-Host "winget installs finished (or were cancelled). If tools are still missing, open a new PowerShell window and run this installer again." -ForegroundColor Yellow
         } elseif (-not $wingetOk) {
             Show-InitGitInstallerMessage -Message ("Missing: `n- " + ($missing -join "`n- ") + "`n`nInstall Git from https://git-scm.com/download/win and Git LFS from https://git-lfs.com when ready.")
         }

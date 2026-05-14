@@ -17,8 +17,7 @@ try {
     do {
         $url = Get-RepositoryUrlFromDialog -DefaultUrl '' -DialogTitle 'InitGit - Repository URL'
         if ([string]::IsNullOrEmpty($url)) {
-            $response = Read-Host "No repository URL provided. Do you want to try again? (Y/N)"
-            if ($response -eq 'N') {
+            if (-not (Show-InitGitYesNoMessage -Message 'No repository URL was entered. Try again?' -Title 'InitGit')) {
                 Write-Host "Exiting script."
                 pause
                 exit 1

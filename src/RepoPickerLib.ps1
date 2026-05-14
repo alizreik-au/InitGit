@@ -675,6 +675,20 @@ function Show-InitGitRepositoryUrlDialog {
     return $null
 }
 
+function Show-InitGitYesNoMessage {
+    <#
+    .SYNOPSIS
+        Use instead of Read-Host when scripts run without a console (e.g. Explorer context menu).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Title = 'InitGit'
+    )
+    Add-Type -AssemblyName PresentationFramework
+    $r = [System.Windows.MessageBox]::Show($Message, $Title, 'YesNo', 'Question', 'Yes')
+    return ($r -eq 'Yes')
+}
+
 # Back-compat alias
 function Get-RepositoryUrlFromDialog {
     param([string]$DefaultUrl = '', [string]$DialogTitle = 'Repository URL')

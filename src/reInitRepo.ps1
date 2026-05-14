@@ -42,8 +42,7 @@ try {
             $url = Get-RepositoryUrlFromDialog -DefaultUrl $url -DialogTitle 'Init copied folder - Repository URL'
         }
         if ([string]::IsNullOrWhiteSpace($url)) {
-            $response = Read-Host "No repository URL provided. Try again? (Y/N)"
-            if ($response -eq 'N') {
+            if (-not (Show-InitGitYesNoMessage -Message 'No repository URL was entered. Try again?' -Title 'Init copied folder')) {
                 Write-Host "Exiting." -ForegroundColor Yellow
                 pause
                 exit 1

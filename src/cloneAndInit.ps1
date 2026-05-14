@@ -94,8 +94,7 @@ try {
     while ([string]::IsNullOrWhiteSpace($url)) {
         $url = Get-RepositoryUrlFromDialog -DefaultUrl $url -DialogTitle 'Clone and init - Repository URL'
         if ([string]::IsNullOrWhiteSpace($url)) {
-            $response = Read-Host "No repository URL provided. Try again? (Y/N)"
-            if ($response -eq 'N') {
+            if (-not (Show-InitGitYesNoMessage -Message 'No repository URL was entered. Try again?' -Title 'Clone and init')) {
                 Write-Host "Exiting."
                 pause
                 exit 1
