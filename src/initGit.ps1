@@ -1,66 +1,21 @@
-# Enable error handling
+#Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 
-function Get-RepositoryUrl {
-    param (
-        [string]$DefaultUrl = ""
-    )
-    
-    Add-Type -AssemblyName PresentationFramework
-    
-    $xaml = @"
-    <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-            xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-            Title="Repository URL" Height="200" Width="600" WindowStartupLocation="CenterScreen"
-            Background="#F0F0F0" ResizeMode="CanResize">
-        <Grid Margin="20">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-            <TextBlock Text="Please enter the repository URL:" FontSize="16" Margin="0,0,0,10"/>
-            <TextBox x:Name="UrlTextBox" Grid.Row="1" FontSize="14" Padding="5"/>
-            <Button x:Name="OkButton" Content="OK" Grid.Row="2" HorizontalAlignment="Right" Margin="0,20,0,0" Padding="20,5" FontSize="14"/>
-        </Grid>
-    </Window>
-"@
-    
-    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-    $window = [Windows.Markup.XamlReader]::Load($reader)
-    
-    $urlTextBox = $window.FindName("UrlTextBox")
-    $okButton = $window.FindName("OkButton")
-    
-    $urlTextBox.Text = $DefaultUrl
-    
-    $okButton.Add_Click({ $window.DialogResult = $true })
-    
-    $result = $window.ShowDialog()
-    
-    if ($result) {
-        return $urlTextBox.Text
-    } else {
-        return $null
-    }
-}
+. (Join-Path -Path $PSScriptRoot -ChildPath 'CloneAndInitLib.ps1')
+. (Join-Path -Path $PSScriptRoot -ChildPath 'RepoPickerLib.ps1')
 
 try {
     $currentDir = if ($args.Length -gt 0) {
         $args[0]
     } else {
-        Get-Location
+        (Get-Location).Path
     }
 
     Set-Location $currentDir
     Write-Host "Working directory: $currentDir"
 
-
-
-# Get repository URL from command line argument or prompt user
-
     do {
-        $url = Get-RepositoryUrl
+        $url = Get-RepositoryUrlFromDialog -DefaultUrl '' -DialogTitle 'InitGit - Repository URL'
         if ([string]::IsNullOrEmpty($url)) {
             $response = Read-Host "No repository URL provided. Do you want to try again? (Y/N)"
             if ($response -eq 'N') {
@@ -71,16 +26,7 @@ try {
         }
     } while ([string]::IsNullOrEmpty($url))
 
-    $userInput = $url
-
-    $gitignorePath = Join-Path (Get-Location) ".gitignore"
-    Set-Content -Path $gitignorePath -Value $gitignoreContent
-
-    if (Test-Path $gitignorePath) {
-            Write-Host ".gitignore file has been created successfully in $(Get-Location)."
-        } else {
-            Write-Host "Failed to create .gitignore file in $(Get-Location)."
-        }
+    $userInput = $url.Trim()
 
     Write-Host "Repository URL: '$userInput'"
 
@@ -108,26 +54,8 @@ try {
     Write-Host "Configuring LFS lock verification..."
     git config "lfs.$userInput.git/info/lfs.locksverify" "true"
 
-    # Create .gitignore file
-    $gitignoreContent = @"
-Binaries
-DerivedDataCache
-Intermediate
-Saved
-.vscode
-.vs
-*.VC.db
-*.opensdf
-*.opendb
-*.sdf
-*.sln
-*.suo
-*.xcodeproj
-*.xcworkspace
-"@
-
     $gitignorePath = Join-Path $currentDir ".gitignore"
-    Set-Content -Path $gitignorePath -Value $gitignoreContent
+    Set-Content -Path $gitignorePath -Value $GitignoreContent -Encoding UTF8
 
     if (Test-Path $gitignorePath) {
         Write-Host ".gitignore file has been created successfully in $currentDir."
@@ -137,8 +65,6 @@ Saved
 
     Write-Host "Script completed."
     pause
-
-
 }
 catch {
     Write-Host "An error occurred:" -ForegroundColor Red

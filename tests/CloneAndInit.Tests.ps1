@@ -3,6 +3,7 @@
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path -Path $repoRoot -ChildPath 'src\CloneAndInitLib.ps1')
+. (Join-Path -Path $repoRoot -ChildPath 'src\RepoPickerLib.ps1')
 
 Describe 'Get-RepoNameFromUrl' {
     It 'Returns repo name from HTTPS URL with .git' {
@@ -79,3 +80,62 @@ Describe 'ConvertTo-RemoteBranchInfo' {
         $result[0].BranchName | Should Be 'good'
     }
 }
+
+Describe 'Get-InitGitRepoProviderType' {
+    It 'Detects Azure DevOps from dev.azure.com' {
+        (Get-InitGitRepoProviderType -UrlOrEmpty 'https://dev.azure.com/org/proj/_git/x') | Should Be 'AzureDevOps'
+    }
+
+    It 'Detects GitHub from github.com' {
+        (Get-InitGitRepoProviderType -UrlOrEmpty 'https://github.com/a/b.git') | Should Be 'GitHub'
+    }
+
+    It 'Respects explicit provider' {
+        (Get-InitGitRepoProviderType -UrlOrEmpty '' -Explicit 'GitHub') | Should Be 'GitHub'
+    }
+}
+
+Describe 'ConvertFrom-GitHubLinkHeaderNextUri' {
+    It 'Parses rel=next from Link header' {
+        $h = '<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"'
+        (ConvertFrom-GitHubLinkHeaderNextUri -LinkHeader $h) | Should Be 'https://api.github.com/user/repos?page=2'
+    }
+
+    It 'Returns null when no next' {
+        (ConvertFrom-GitHubLinkHeaderNextUri -LinkHeader '<https://api.github.com/user/repos?page=1>; rel="last"') | Should Be $null
+    }
+}
+
+Describe 'Get-InitGitGitHubOwnerRepoFromUrl' {
+    It 'Parses https github URL' {
+        $o, $r = Get-InitGitGitHubOwnerRepoFromUrl -Url 'https://github.com/acme/widget.git'
+        $o | Should Be 'acme'
+        $r | Should Be 'widget'
+    }
+
+    It 'Parses SSH github URL' {
+        $o, $r = Get-InitGitGitHubOwnerRepoFromUrl -Url 'git@github.com:acme/widget.git'
+        $o | Should Be 'acme'
+        $r | Should Be 'widget'
+    }
+}
+
+Describe 'Merge-InitGitProfileLists' {
+    It 'Merges saved and env without duplicate env id' {
+        $envP = [pscustomobject]@{ Id = 'env:GITHUB_TOKEN'; DisplayName = 'GH'; Provider = 'GitHub'; Org = ''; ApiBase = ''; FromEnv = $true }
+        $saved = [pscustomobject]@{ Id = '1'; DisplayName = 'S'; Provider = 'GitHub'; Org = ''; ApiBase = ''; FromEnv = $false }
+        $m = Merge-InitGitProfileLists -Saved @($saved) -EnvProfiles @($envP) -CmdkeyHints @()
+        $m.Count | Should Be 2
+    }
+}
+
+Describe 'Prerequisite JSON contract' {
+    It 'Parses sample prerequisite output shape' {
+        $json = '{"GitPresent":true,"LfsPresent":false,"GcmPresent":true,"GitVersion":"git 2.0","Messages":["x"],"WingetIds":{"Git":"Git.Git"}}'
+        $o = $json | ConvertFrom-Json
+        $o.GitPresent | Should Be $true
+        $o.LfsPresent | Should Be $false
+        $o.WingetIds.Git | Should Be 'Git.Git'
+    }
+}
+

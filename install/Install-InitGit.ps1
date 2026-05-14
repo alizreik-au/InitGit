@@ -22,13 +22,27 @@ $CopyMap = @(
     @{ Src = 'updateRepo.bat'; Dest = 'updateRepo.bat' },
     @{ Src = 'reInitRepo.ps1'; Dest = 'reInitRepo.ps1' },
     @{ Src = 'reInitRepo.bat'; Dest = 'reInitRepo.bat' },
-    @{ Src = 'CloneAndInitLib.ps1'; Dest = 'CloneAndInitLib.ps1' }
+    @{ Src = 'CloneAndInitLib.ps1'; Dest = 'CloneAndInitLib.ps1' },
+    @{ Src = 'RepoPickerLib.ps1'; Dest = 'RepoPickerLib.ps1' }
 )
 
 Write-Host "InitGit Installer" -ForegroundColor Cyan
 Write-Host "=================" -ForegroundColor Cyan
 Write-Host "Install/update to: $InstallDir" -ForegroundColor White
 Write-Host ""
+
+. (Join-Path -Path $PSScriptRoot -ChildPath 'InstallDialogHelpers.ps1')
+
+$prereqResultPath = Join-Path -Path $env:TEMP -ChildPath ("InitGit-prereq-" + [guid]::NewGuid().ToString('n') + '.json')
+$checkScriptSource = Join-Path -Path $PSScriptRoot -ChildPath 'Check-InitGit-Prerequisites.ps1'
+if (Test-Path -LiteralPath $checkScriptSource) {
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $checkScriptSource, '-ResultPath', $prereqResultPath
+    ) -WindowStyle Hidden | Out-Null
+    Write-Host "Started prerequisite check in the background..." -ForegroundColor Gray
+} else {
+    Write-Host "Check-InitGit-Prerequisites.ps1 not found; skipping background check." -ForegroundColor Yellow
+}
 
 if (-not (Test-Path -LiteralPath $ScriptsSourceDir -PathType Container)) {
     Write-Error "Source directory not found: $ScriptsSourceDir"
@@ -52,6 +66,18 @@ foreach ($entry in $CopyMap) {
         Write-Host "  Copied: $($entry.Dest)" -ForegroundColor Green
     } else {
         Write-Host "  Skipped (not found): $($entry.Src)" -ForegroundColor Yellow
+    }
+}
+
+$installHelperSrc = Join-Path -Path $PSScriptRoot -ChildPath 'InstallDialogHelpers.ps1'
+$checkSrc = Join-Path -Path $PSScriptRoot -ChildPath 'Check-InitGit-Prerequisites.ps1'
+foreach ($pair in @(
+        @{ Src = $installHelperSrc; Dest = 'InstallDialogHelpers.ps1' },
+        @{ Src = $checkSrc; Dest = 'Check-InitGit-Prerequisites.ps1' }
+    )) {
+    if (Test-Path -LiteralPath $pair.Src -PathType Leaf) {
+        Copy-Item -LiteralPath $pair.Src -Destination (Join-Path $InstallDir $pair.Dest) -Force
+        Write-Host "  Copied: $($pair.Dest)" -ForegroundColor Green
     }
 }
 
@@ -232,8 +258,50 @@ Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green
 Write-Host ""
 
-$addContext = Read-Host "Add 'Clone and init repo' to folder right-click context menu? (Y/n)"
-if ($addContext -ne 'n' -and $addContext -ne 'N') {
+# Wait for prerequisite JSON (written by parallel child)
+$prereq = $null
+if (Test-Path -LiteralPath $checkScriptSource) {
+    $deadline = (Get-Date).AddSeconds(120)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $prereqResultPath) {
+            try {
+                $raw = Get-Content -LiteralPath $prereqResultPath -Raw -Encoding UTF8 -ErrorAction Stop
+                $prereq = $raw | ConvertFrom-Json
+                if ($null -ne $prereq.GitPresent) { break }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+$wingetOk = $false
+try {
+    & winget.exe --version 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $wingetOk = $true }
+} catch { }
+
+if ($prereq) {
+    $missing = @()
+    if (-not $prereq.GitPresent) { $missing += 'Git is missing or not on PATH.' }
+    if (-not $prereq.LfsPresent) { $missing += 'Git LFS is missing.' }
+    if (-not $prereq.GcmPresent) { $missing += 'Git Credential Manager was not detected.' }
+    foreach ($m in $prereq.Messages) { if ($m) { $missing += [string]$m } }
+
+    $missing = @($missing | Select-Object -Unique)
+
+    if ($missing.Count -gt 0) {
+        $doInstall = Show-InitGitPrerequisitesInstallDialog -MissingLines $missing -WingetAvailable:$wingetOk
+        if ($doInstall -and $wingetOk) {
+            Invoke-InitGitWingetInstallMissing -NeedGit:(-not $prereq.GitPresent) -NeedLfs:(-not $prereq.LfsPresent) -NeedGcm:(-not $prereq.GcmPresent)
+            Update-InitGitSessionPathFromMachine
+            Show-InitGitInstallerMessage -Message 'winget installs finished (or were cancelled). If anything still fails, close this window, open a new PowerShell, and run the installer again.'
+        } elseif (-not $wingetOk) {
+            Show-InitGitInstallerMessage -Message ("Missing: `n- " + ($missing -join "`n- ") + "`n`nInstall Git from https://git-scm.com/download/win and Git LFS from https://git-lfs.com when ready.")
+        }
+    }
+}
+
+if (Show-InitGitContextMenuRegDialog) {
     try {
         $proc = Start-Process -FilePath 'reg.exe' -ArgumentList 'import', "`"$regFile`"" -Verb RunAs -Wait -PassThru
         if ($proc.ExitCode -eq 0) {
@@ -257,4 +325,5 @@ Write-Host "  - Update existing repo to InitGit: updateRepo.bat or right-click f
 Write-Host "  - Re-add context menu: Add-InitGit-Context-Menu.bat" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Windows 11: The entry appears under 'Show more options' when you right-click a folder." -ForegroundColor Yellow
+Write-Host "Repo picker: use a GitHub or Azure DevOps PAT with repo/code read scope to list remotes." -ForegroundColor Gray
 Write-Host ""

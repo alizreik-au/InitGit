@@ -12,43 +12,7 @@ $ErrorActionPreference = "Stop"
 
 # Dot-source shared helpers and content (used by tests as well)
 . (Join-Path -Path $PSScriptRoot -ChildPath 'CloneAndInitLib.ps1')
-
-function Get-RepositoryUrl {
-    param([string]$DefaultUrl = "")
-
-    Add-Type -AssemblyName PresentationFramework
-
-    $xaml = @"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Clone and init - Repository URL" Height="200" Width="600" WindowStartupLocation="CenterScreen"
-        Background="#F0F0F0" ResizeMode="CanResize">
-    <Grid Margin="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-        <TextBlock Text="Enter the repository URL to clone:" FontSize="16" Margin="0,0,0,10"/>
-        <TextBox x:Name="UrlTextBox" Grid.Row="1" FontSize="14" Padding="5"/>
-        <Button x:Name="OkButton" Content="OK" Grid.Row="2" HorizontalAlignment="Right" Margin="0,20,0,0" Padding="20,5" FontSize="14"/>
-    </Grid>
-</Window>
-"@
-
-    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-    $window = [Windows.Markup.XamlReader]::Load($reader)
-
-    $urlTextBox = $window.FindName("UrlTextBox")
-    $okButton = $window.FindName("OkButton")
-
-    $urlTextBox.Text = $DefaultUrl
-    $okButton.Add_Click({ $window.DialogResult = $true })
-
-    $result = $window.ShowDialog()
-    if ($result) { return $urlTextBox.Text }
-    return $null
-}
+. (Join-Path -Path $PSScriptRoot -ChildPath 'RepoPickerLib.ps1')
 
 function Select-RemoteBranch {
     param(
@@ -128,7 +92,7 @@ try {
     # Repo URL: from argument or GUI
     $url = if ($args.Length -gt 1) { $args[1] } else { $null }
     while ([string]::IsNullOrWhiteSpace($url)) {
-        $url = Get-RepositoryUrl -DefaultUrl $url
+        $url = Get-RepositoryUrlFromDialog -DefaultUrl $url -DialogTitle 'Clone and init - Repository URL'
         if ([string]::IsNullOrWhiteSpace($url)) {
             $response = Read-Host "No repository URL provided. Try again? (Y/N)"
             if ($response -eq 'N') {
@@ -166,11 +130,35 @@ try {
     Write-Host "Parent directory: $parentDir"
     Write-Host ""
 
-    # Clone
-    Write-Host "Cloning repository..."
+    $repoName = Get-RepoNameFromUrl -Url $url
+    $clonePath = if ($repoName) { Join-Path -Path $parentDir -ChildPath $repoName } else { $null }
+
+    # Pre-clone disk check (rough; LFS not estimated)
+    $free = Get-InitGitDriveFreeBytes -Path $parentDir
+    $minB = Get-InitGitMinFreeBytesThreshold
+    if ($free -ge 0 -and $free -lt $minB) {
+        if (-not (Show-InitGitLowDiskSpaceDialog -FreeBytes $free -MinBytes $minB)) {
+            Write-Host "Cancelled (low disk space)." -ForegroundColor Yellow
+            pause
+            exit 1
+        }
+    }
+
+    $owner, $repoPart = Get-InitGitGitHubOwnerRepoFromUrl -Url $url
+    $patHint = $env:GITHUB_TOKEN
+    if ($owner -and $repoPart -and $patHint) {
+        $kb = Get-InitGitGitHubRepoSizeKb -Owner $owner -Repo $repoPart -Pat $patHint
+        if ($null -ne $kb) {
+            $approxMb = [math]::Round($kb / 1024, 1)
+            Write-Host "GitHub reports a rough git object size on server of about $approxMb MB (excluding LFS)." -ForegroundColor Gray
+        }
+    }
+
+    # Clone: do NOT use --single-branch so all origin/* branches exist (Visual Studio branch list).
+    Write-Host "Cloning repository (all branches will be fetched; initial checkout: $($selectedBranch.BranchName))..."
     Push-Location -LiteralPath $parentDir
     try {
-        git clone --branch $selectedBranch.BranchName --single-branch $url
+        git clone --branch $selectedBranch.BranchName $url
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Clone failed." -ForegroundColor Red
             pause
@@ -180,18 +168,26 @@ try {
         Pop-Location
     }
 
-    $repoName = Get-RepoNameFromUrl -Url $url
     if (-not $repoName) {
         Write-Host "Could not infer repo folder name from URL. Please run setup-merge-driver manually in the cloned folder." -ForegroundColor Yellow
         pause
         exit 0
     }
 
-    $clonePath = Join-Path -Path $parentDir -ChildPath $repoName
     if (-not (Test-Path -LiteralPath $clonePath -PathType Container)) {
         Write-Host "Cloned folder not found: $clonePath" -ForegroundColor Red
         pause
         exit 1
+    }
+
+    Push-Location -LiteralPath $clonePath
+    try {
+        git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+        if ($LASTEXITCODE -eq 0) {
+            git fetch origin
+        }
+    } finally {
+        Pop-Location
     }
 
     # Generate .gitignore and .gitattributes in the clone

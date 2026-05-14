@@ -11,43 +11,7 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path -Path $PSScriptRoot -ChildPath 'CloneAndInitLib.ps1')
-
-function Get-RepositoryUrl {
-    param([string]$DefaultUrl = "")
-
-    Add-Type -AssemblyName PresentationFramework
-
-    $xaml = @"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Repository URL" Height="200" Width="600" WindowStartupLocation="CenterScreen"
-        Background="#F0F0F0" ResizeMode="CanResize">
-    <Grid Margin="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-        <TextBlock Text="Please enter the repository URL:" FontSize="16" Margin="0,0,0,10"/>
-        <TextBox x:Name="UrlTextBox" Grid.Row="1" FontSize="14" Padding="5"/>
-        <Button x:Name="OkButton" Content="OK" Grid.Row="2" HorizontalAlignment="Right" Margin="0,20,0,0" Padding="20,5" FontSize="14"/>
-    </Grid>
-</Window>
-"@
-
-    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-    $window = [Windows.Markup.XamlReader]::Load($reader)
-
-    $urlTextBox = $window.FindName("UrlTextBox")
-    $okButton = $window.FindName("OkButton")
-
-    $urlTextBox.Text = $DefaultUrl
-    $okButton.Add_Click({ $window.DialogResult = $true })
-
-    $result = $window.ShowDialog()
-    if ($result) { return $urlTextBox.Text }
-    return $null
-}
+. (Join-Path -Path $PSScriptRoot -ChildPath 'RepoPickerLib.ps1')
 
 try {
     $targetPath = if ($args.Length -gt 0) { $args[0].Trim('"') } else { (Get-Location).Path }
@@ -75,7 +39,7 @@ try {
     do {
         $url = if ($args.Length -gt 1) { $args[1] } else { $null }
         if ([string]::IsNullOrWhiteSpace($url)) {
-            $url = Get-RepositoryUrl -DefaultUrl $url
+            $url = Get-RepositoryUrlFromDialog -DefaultUrl $url -DialogTitle 'Init copied folder - Repository URL'
         }
         if ([string]::IsNullOrWhiteSpace($url)) {
             $response = Read-Host "No repository URL provided. Try again? (Y/N)"
