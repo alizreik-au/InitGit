@@ -33,7 +33,7 @@ try {
     git init
 
     Write-Host "Adding Git remote..."
-    git remote add origin $userInput
+    & git remote add origin -- $userInput
 
     Write-Host "Configuring Git for HTTP/1.1..."
     git config --local http.version HTTP/1.1

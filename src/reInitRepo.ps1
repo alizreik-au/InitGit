@@ -67,7 +67,7 @@ try {
         Set-Content -LiteralPath (Join-Path -Path $repoRoot -ChildPath '.gitattributes') -Value $GitattributesContent -Encoding UTF8
         Write-Host "  Generated: .gitattributes" -ForegroundColor Green
 
-        git remote add origin $url
+        & git remote add origin -- $url
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Linked remote origin: $url" -ForegroundColor Green
         } else {

@@ -13,15 +13,197 @@ try {
 } catch { }
 
 $script:InitGitProfilesFileName = 'repo-profiles.json'
+$script:InitGitUserDataFolderName = 'UserData'
+$script:InitGitDefaultAzureOrg = 'affirmer'
+$script:InitGitDefaultAzureCloneUrl = 'https://affirmer@dev.azure.com/affirmer/Affirmer_Git/_git/'
+
+function Get-InitGitDefaultRepositoryUrl {
+    [OutputType([string])]
+    param()
+    return $script:InitGitDefaultAzureCloneUrl
+}
+
+function Get-InitGitDefaultAzureOrganization {
+    [OutputType([string])]
+    param()
+    if (-not [string]::IsNullOrWhiteSpace($env:AZURE_DEVOPS_ORG)) {
+        return $env:AZURE_DEVOPS_ORG.Trim()
+    }
+    return $script:InitGitDefaultAzureOrg
+}
+
+function Get-InitGitPatFromGitCredentialManager {
+    <#
+    .SYNOPSIS
+        Reads a stored PAT/password from Git Credential Manager for dev.azure.com.
+    #>
+    [OutputType([string])]
+    param(
+        [string]$HostName = 'dev.azure.com',
+        [string]$Username
+    )
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
+    $user = if ([string]::IsNullOrWhiteSpace($Username)) { 'git' } else { $Username.Trim() }
+    $stdin = "protocol=https`nhost=$HostName`nusername=$user`n`n"
+    foreach ($helper in @('credential-manager', 'credential-manager-core')) {
+        try {
+            $out = $stdin | & git $helper get 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($out)) { continue }
+            foreach ($line in ($out -split "`r?`n")) {
+                if ($line -match '^password=(.+)$') { return $Matches[1].Trim() }
+            }
+        } catch { }
+    }
+    try {
+        $out = $stdin | & git credential fill 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            foreach ($line in ($out -split "`r?`n")) {
+                if ($line -match '^password=(.+)$') { return $Matches[1].Trim() }
+            }
+        }
+    } catch { }
+    return $null
+}
+
+function Test-InitGitHasAzureDevOpsCredential {
+    [OutputType([bool])]
+    param([string]$Organization = '')
+    if (-not [string]::IsNullOrWhiteSpace($env:AZURE_DEVOPS_EXT_PAT)) { return $true }
+    foreach ($t in (Get-InitGitCmdkeyGitTargets)) {
+        if ($t -match 'dev\.azure\.com') { return $true }
+    }
+    $org = if ([string]::IsNullOrWhiteSpace($Organization)) { Get-InitGitDefaultAzureOrganization } else { $Organization.Trim() }
+    return -not [string]::IsNullOrWhiteSpace((Get-InitGitPatFromGitCredentialManager -Username $org))
+}
+
+function Save-InitGitAzureDevOpsPatToCredentialManager {
+    <#
+    .SYNOPSIS
+        Stores an Azure DevOps PAT in Git Credential Manager (and cmdkey fallback).
+    #>
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$Pat,
+        [string]$Organization = ''
+    )
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
+    $user = if ([string]::IsNullOrWhiteSpace($Organization)) { Get-InitGitDefaultAzureOrganization } else { $Organization.Trim() }
+    $stdin = @(
+        'protocol=https'
+        'host=dev.azure.com'
+        "username=$user"
+        "password=$Pat"
+        ''
+    ) -join "`n"
+    foreach ($helper in @('credential-manager', 'credential-manager-core')) {
+        try {
+            $stdin | & git $helper store 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        } catch { }
+    }
+    try {
+        $stdin | & git credential store 2>$null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    } catch { }
+    try {
+        & cmdkey.exe /generic:'git:https://dev.azure.com' /user:$user /pass:$Pat 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Show-InitGitAzurePatDialog {
+    <#
+    .SYNOPSIS
+        Prompts for an Azure DevOps PAT (saved to GCM by the caller).
+    #>
+    [OutputType([string])]
+    param(
+        [string]$Organization = '',
+        [string]$Title = 'Azure DevOps - Personal Access Token'
+    )
+    Add-Type -AssemblyName PresentationFramework
+    $orgLabel = if ([string]::IsNullOrWhiteSpace($Organization)) { Get-InitGitDefaultAzureOrganization } else { $Organization.Trim() }
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" Height="240" Width="480" WindowStartupLocation="CenterScreen"
+        Background="#F5F5F5" ResizeMode="NoResize">
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock TextWrapping="Wrap" Margin="0,0,0,12"
+      Text="Enter a Personal Access Token for Azure DevOps organization '$orgLabel' with Code (read) scope. InitGit will save it in Git Credential Manager for git clone and fetch."/>
+    <TextBlock Grid.Row="1" FontWeight="SemiBold" Margin="0,0,0,6" Text="Token"/>
+    <PasswordBox x:Name="PatBox" Grid.Row="2" MinHeight="32" VerticalAlignment="Top"/>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="CancelBtn" Content="Cancel" MinWidth="90" Margin="0,0,8,0" Padding="10,6" IsCancel="True"/>
+      <Button x:Name="OkBtn" Content="Save and continue" MinWidth="130" Padding="10,6" IsDefault="True"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"@
+    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+    $patBox = $window.FindName('PatBox')
+    $ok = $window.FindName('OkBtn')
+    $cancel = $window.FindName('CancelBtn')
+    $ok.Add_Click({
+            if ([string]::IsNullOrWhiteSpace($patBox.Password)) { return }
+            $window.Tag = $patBox.Password
+            $window.DialogResult = $true
+        })
+    $cancel.Add_Click({ $window.DialogResult = $false })
+    $null = $window.ShowDialog()
+    if ($window.DialogResult -eq $true) { return [string]$window.Tag }
+    return $null
+}
+
+function Get-InitGitInstallRoot {
+    [OutputType([string])]
+    param()
+    return (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'InitGit')
+}
+
+function Get-InitGitUserDataDir {
+    [OutputType([string])]
+    param()
+    $dir = Join-Path -Path (Get-InitGitInstallRoot) -ChildPath $script:InitGitUserDataFolderName
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+    }
+    return $dir
+}
+
+function Get-InitGitPathsToPreserveOnInstall {
+    <#
+    .SYNOPSIS
+        Relative paths under InitGit install root that must not be deleted on update.
+    #>
+    [OutputType([string[]])]
+    param()
+    return ,@($script:InitGitUserDataFolderName)
+}
 
 function Get-InitGitProfilesPath {
     [OutputType([string])]
     param()
-    $dir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'InitGit'
-    if (-not (Test-Path -LiteralPath $dir)) {
-        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+    $userDataDir = Get-InitGitUserDataDir
+    $newPath = Join-Path -Path $userDataDir -ChildPath $script:InitGitProfilesFileName
+    $legacyPath = Join-Path -Path (Get-InitGitInstallRoot) -ChildPath $script:InitGitProfilesFileName
+    if ((Test-Path -LiteralPath $legacyPath) -and -not (Test-Path -LiteralPath $newPath)) {
+        try {
+            Move-Item -LiteralPath $legacyPath -Destination $newPath -Force
+        } catch {
+            Copy-Item -LiteralPath $legacyPath -Destination $newPath -Force
+        }
     }
-    return (Join-Path -Path $dir -ChildPath $script:InitGitProfilesFileName)
+    return $newPath
 }
 
 function Get-InitGitRepoProviderType {
@@ -48,12 +230,13 @@ function Get-InitGitGitHubOwnerRepoFromUrl {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return @($null, $null) }
     $pathPart = ($Url -split '[?#]')[0].TrimEnd('/')
-    if ($pathPart -match '^https?://([^/]+)/([^/]+)/([^/]+)') {
+    if ($pathPart -match '^https?://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?(?:/|$)') {
         $hostPart = $Matches[1]
         $seg1 = $Matches[2]
-        $seg2 = $Matches[3] -replace '\.git$', ''
+        $seg2 = $Matches[3]
         if ($hostPart -match 'github') {
             if ($seg1 -eq '_git') { return @($null, $null) }
+            if ($seg2 -match '^(tree|blob|pull|commits|releases|wiki|settings)$') { return @($null, $null) }
             return @($seg1, $seg2)
         }
     }
@@ -63,9 +246,20 @@ function Get-InitGitGitHubOwnerRepoFromUrl {
     return @($null, $null)
 }
 
+function ConvertTo-GitHubLinkHeaderString {
+    [OutputType([string])]
+    param($LinkHeader)
+    if ($null -eq $LinkHeader) { return $null }
+    if ($LinkHeader -is [System.Array]) {
+        return ($LinkHeader | Select-Object -First 1)
+    }
+    return [string]$LinkHeader
+}
+
 function ConvertFrom-GitHubLinkHeaderNextUri {
     [OutputType([string])]
     param([string]$LinkHeader)
+    $LinkHeader = ConvertTo-GitHubLinkHeaderString -LinkHeader $LinkHeader
     if ([string]::IsNullOrWhiteSpace($LinkHeader)) { return $null }
     foreach ($part in ($LinkHeader -split ',')) {
         if ($part -match '^\s*<([^>]+)>\s*;\s*rel="next"') {
@@ -148,7 +342,11 @@ function Get-InitGitSavedProfiles {
 }
 
 function Save-InitGitSavedProfiles {
-    param([Parameter(Mandatory)][object[]]$Profiles)
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Profiles
+    )
     $path = Get-InitGitProfilesPath
     $serializable = foreach ($p in $Profiles) {
         if ($p.FromEnv) { continue }
@@ -163,6 +361,87 @@ function Save-InitGitSavedProfiles {
     $arr = @($serializable)
     $json = if ($arr.Count -gt 0) { $arr | ConvertTo-Json -Depth 4 } else { '[]' }
     Set-Content -LiteralPath $path -Value $json -Encoding UTF8
+}
+
+function Add-InitGitSavedProfile {
+    param(
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][string]$Provider,
+        [string]$Org = '',
+        [string]$ApiBase = ''
+    )
+    $name = $DisplayName.Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) { return }
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in (Get-InitGitSavedProfiles)) {
+        if ($p.DisplayName -eq $name) { continue }
+        $list.Add($p) | Out-Null
+    }
+    $list.Add([pscustomobject]@{
+            Id          = [guid]::NewGuid().ToString('n')
+            DisplayName = $name
+            Provider    = $Provider
+            Org         = $Org
+            ApiBase     = $ApiBase
+            FromEnv     = $false
+        }) | Out-Null
+    Save-InitGitSavedProfiles -Profiles $list.ToArray()
+}
+
+function Resolve-InitGitPat {
+    param(
+        [string]$TypedPat,
+        [ValidateSet('GitHub', 'AzureDevOps')]
+        [string]$Provider
+    )
+    if (-not [string]::IsNullOrWhiteSpace($TypedPat)) { return $TypedPat.Trim() }
+    if ($Provider -eq 'AzureDevOps' -and $env:AZURE_DEVOPS_EXT_PAT) { return $env:AZURE_DEVOPS_EXT_PAT }
+    if ($Provider -eq 'GitHub' -and $env:GITHUB_TOKEN) { return $env:GITHUB_TOKEN }
+    return $null
+}
+
+function Get-InitGitRepoListPage {
+    <#
+    .SYNOPSIS
+        Fetches one page of repositories (for background jobs / runspaces). Returns serializable hashtable.
+    #>
+    param(
+        [ValidateSet('GitHub', 'AzureDevOps')]
+        [string]$Provider,
+        [Parameter(Mandatory)][string]$Pat,
+        [string]$ApiBase = 'https://api.github.com',
+        [string]$Organization = '',
+        [string]$NextGitHubUri = $null,
+        [string]$NextAzToken = $null
+    )
+    try {
+        if ($Provider -eq 'AzureDevOps') {
+            $page = Invoke-InitGitAzureDevOpsReposPage -Organization $Organization -Pat $Pat -ContinuationToken $NextAzToken
+            return @{
+                Ok            = $true
+                Repos         = @($page.Repos)
+                NextGitHubUri = $null
+                NextAzToken   = $page.ContinuationToken
+                Error         = $null
+            }
+        }
+        $page = Invoke-InitGitGitHubUserReposPage -Pat $Pat -ApiBase $ApiBase -NextUri $NextGitHubUri
+        return @{
+            Ok            = $true
+            Repos         = @($page.Repos)
+            NextGitHubUri = $page.NextUri
+            NextAzToken   = $null
+            Error         = $null
+        }
+    } catch {
+        return @{
+            Ok            = $false
+            Repos         = @()
+            NextGitHubUri = $null
+            NextAzToken   = $null
+            Error         = $_.Exception.Message
+        }
+    }
 }
 
 function Merge-InitGitProfileLists {
@@ -243,7 +522,7 @@ function Invoke-InitGitGitHubUserReposPage {
         $code = $_.Exception.Response.StatusCode.value__
         throw "GitHub API error ($code): $($_.Exception.Message)"
     }
-    $link = $response.Headers['Link']
+    $link = ConvertTo-GitHubLinkHeaderString -LinkHeader $response.Headers['Link']
     $next = ConvertFrom-GitHubLinkHeaderNextUri -LinkHeader $link
     $items = ($response.Content | ConvertFrom-Json)
     if ($items -isnot [System.Array]) { $items = @($items) }
@@ -265,7 +544,11 @@ function Invoke-InitGitAzureDevOpsReposPage {
         [string]$ContinuationToken = $null
     )
     $orgSeg = $Organization.Trim()
-    $uri = "https://dev.azure.com/$orgSeg/_apis/git/repositories?api-version=7.0&`$top=100"
+    if ([string]::IsNullOrWhiteSpace($orgSeg)) {
+        throw 'Azure DevOps organization name is required.'
+    }
+    $orgEnc = [Uri]::EscapeDataString($orgSeg)
+    $uri = "https://dev.azure.com/$orgEnc/_apis/git/repositories?api-version=7.0&`$top=100"
     if ($ContinuationToken) {
         $uri += '&continuationToken=' + [Uri]::EscapeDataString($ContinuationToken)
     }
@@ -286,8 +569,6 @@ function Invoke-InitGitAzureDevOpsReposPage {
     if (-not $items) { $items = @() }
     $repos = foreach ($r in $items) {
         $clone = $r.remoteUrl
-        if (-not $clone) { $clone = $r.url }
-        if (-not $clone) { $clone = $r.webUrl }
         if (-not $clone) { continue }
         $proj = $r.project.name
         $nm = if ($proj) { "$proj / $($r.name)" } else { [string]$r.name }
@@ -378,7 +659,7 @@ function Show-InitGitLowDiskSpaceDialog {
 function Show-InitGitRepositoryUrlDialog {
     <#
     .SYNOPSIS
-        WPF modal: provider, profiles, PAT, load repos (paged), manual URL.
+        Simple WPF modal: clone URL first; optional expander to list repos with a PAT.
     #>
     [OutputType([string])]
     param(
@@ -386,25 +667,28 @@ function Show-InitGitRepositoryUrlDialog {
         [string]$DialogTitle = 'Repository URL'
     )
 
+    if ([string]::IsNullOrWhiteSpace($DefaultUrl)) {
+        $DefaultUrl = Get-InitGitDefaultRepositoryUrl
+    }
+
     Add-Type -AssemblyName PresentationFramework
 
-    $cmdHints = Get-InitGitCmdkeyGitTargets
-    $envProfs = Get-InitGitEnvImplicitProfiles
-    $saved = Get-InitGitSavedProfiles
-    $allProfiles = Merge-InitGitProfileLists -Saved $saved -EnvProfiles $envProfs -CmdkeyHints $cmdHints
+    $apiDefault = 'https://api.github.com'
+    $pickerState = @{
+        NextGitHubUri    = [string]$null
+        NextAzToken      = [string]$null
+        LoadGeneration   = 0
+    }
+    $repoList = [System.Collections.Generic.List[object]]::new()
+    $savedProfilesByName = @{}
 
     $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Repository URL" Height="560" Width="720" WindowStartupLocation="CenterScreen"
-        Background="#F0F0F0" ResizeMode="CanResize">
-  <Grid Margin="14">
+        Title="Repository URL" MinWidth="440" MinHeight="360" Width="640" Height="520"
+        WindowStartupLocation="CenterScreen" Background="#F5F5F5" ResizeMode="CanResize">
+  <Grid Margin="16">
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
@@ -412,36 +696,93 @@ function Show-InitGitRepositoryUrlDialog {
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-    <TextBlock Text="Provider" FontWeight="SemiBold" Margin="0,0,0,4"/>
-    <ComboBox x:Name="ProviderCombo" Grid.Row="1" Margin="0,0,0,10" IsEditable="False"/>
-    <TextBlock Grid.Row="2" Text="Profile / account" FontWeight="SemiBold" Margin="0,0,0,4"/>
-    <ComboBox x:Name="ProfileCombo" Grid.Row="3" Margin="0,0,0,8" IsEditable="True" StaysOpenOnEdit="True" IsTextSearchEnabled="True"/>
-    <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,8">
-      <TextBlock Text="Azure org: " VerticalAlignment="Center" Margin="0,0,6,0"/>
-      <TextBox x:Name="OrgTextBox" Width="220" VerticalAlignment="Center"/>
-      <TextBlock Text="  GitHub API: " VerticalAlignment="Center" Margin="12,0,6,0"/>
-      <TextBox x:Name="ApiBaseTextBox" Width="260" VerticalAlignment="Center"/>
+    <Grid Grid.Row="0" Margin="0,0,0,12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Grid.Column="0" TextWrapping="Wrap" FontSize="14" Foreground="#222" VerticalAlignment="Center"
+        Text="Azure DevOps clone URL (edit below). Use Load Repositories to pick a repo from your organization."/>
+      <Button x:Name="LoadReposTopButton" Grid.Column="1" Content="Load Repositories"
+              MinWidth="150" Padding="12,8" Margin="12,0,0,0" VerticalAlignment="Top"/>
+    </Grid>
+    <TextBlock Grid.Row="1" FontWeight="SemiBold" Margin="0,0,0,6" Text="Clone URL"/>
+    <TextBox x:Name="UrlTextBox" Grid.Row="2" MinHeight="96" VerticalAlignment="Stretch"
+             FontSize="13" Padding="8" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+    <Expander x:Name="OptionalExpander" Grid.Row="3" Margin="0,12,0,0" IsExpanded="True"
+              Header="Azure DevOps account (org, token, repository list)">
+      <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="280" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="0,8,0,0">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#444" Margin="0,0,0,6"
+            Text="Configured for Azure DevOps. Paste a read-only token below, or sign in when you click Load Repositories (saved to Git Credential Manager)."/>
+          <TextBlock x:Name="EnvPatHint" Grid.Row="1" TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8" FontSize="11"/>
+          <Grid Grid.Row="2" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" MinWidth="100"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Saved name" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <ComboBox x:Name="SavedProfileCombo" Grid.Column="1" MinHeight="28" IsEditable="False" HorizontalAlignment="Stretch"/>
+          </Grid>
+          <Grid Grid.Row="3" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" MinWidth="100"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Account" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <ComboBox x:Name="ProviderCombo" Grid.Column="1" MinHeight="28" IsEditable="False" HorizontalAlignment="Stretch"/>
+          </Grid>
+          <Grid x:Name="OrgRow" Grid.Row="4" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" MinWidth="100"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Azure org" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <TextBox x:Name="OrgTextBox" Grid.Column="1" MinHeight="28" VerticalAlignment="Stretch"/>
+          </Grid>
+          <Grid Grid.Row="5" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" MinWidth="100"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Token" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <PasswordBox x:Name="PatPasswordBox" Grid.Column="1" MinHeight="28"/>
+          </Grid>
+          <StackPanel Grid.Row="6" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="LoadMoreButton" Content="Load more" Padding="12,6" IsEnabled="False"/>
+          </StackPanel>
+          <TextBlock Grid.Row="7" Text="Choose a repo (fills the clone URL above)" Margin="0,0,0,4"/>
+          <ComboBox x:Name="RepoCombo" Grid.Row="8" MinHeight="30" IsEditable="True" StaysOpenOnEdit="True" IsTextSearchEnabled="True" HorizontalAlignment="Stretch"/>
+          <Expander x:Name="ExpertExpander" Grid.Row="9" Margin="0,12,0,0" IsExpanded="False" Header="Expert: switch to GitHub, API URL, test token, save profile name">
+            <StackPanel Margin="0,8,0,0">
+              <TextBlock Text="GitHub API (leave default for github.com)" Margin="0,0,0,4"/>
+              <TextBox x:Name="ApiBaseTextBox" MinHeight="28" Margin="0,0,0,8"/>
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="TestConnButton" Content="Test connection" Padding="10,5" Margin="0,0,8,0"/>
+                <Button x:Name="SaveProfileButton" Content="Save profile name..." Padding="10,5"/>
+              </StackPanel>
+            </StackPanel>
+          </Expander>
+        </Grid>
+      </ScrollViewer>
+    </Expander>
+    <TextBlock x:Name="StatusText" Grid.Row="4" TextWrapping="Wrap" Foreground="#555" Margin="0,8,0,0" FontSize="12"/>
+    <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="OkButton" Content="Continue" MinWidth="110" Margin="0,0,10,0" Padding="14,8" IsDefault="True"/>
+      <Button x:Name="CancelButton" Content="Cancel" MinWidth="110" Padding="14,8"/>
     </StackPanel>
-    <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,0,0,8">
-      <TextBlock Text="PAT (not saved unless you click Save profile)" VerticalAlignment="Center" Margin="0,0,8,0"/>
-      <PasswordBox x:Name="PatPasswordBox" Width="280" VerticalAlignment="Center"/>
-      <Button x:Name="TestConnButton" Content="Test connection" Margin="10,0,0,0" Padding="10,4"/>
-      <Button x:Name="SaveProfileButton" Content="Save profile..." Margin="8,0,0,0" Padding="10,4"/>
-    </StackPanel>
-    <StackPanel Grid.Row="6" Orientation="Horizontal" Margin="0,0,0,8">
-      <Button x:Name="LoadReposButton" Content="Load repositories" Padding="12,5"/>
-      <Button x:Name="LoadMoreButton" Content="Load more" Margin="8,0,0,0" Padding="12,5" IsEnabled="False"/>
-      <TextBlock x:Name="RepoHintText" Text="Select a repo below or type the clone URL." VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap" Foreground="#444"/>
-    </StackPanel>
-    <ComboBox x:Name="RepoCombo" Grid.Row="7" Margin="0,0,0,8" IsEditable="True" StaysOpenOnEdit="True" IsTextSearchEnabled="True"/>
-    <TextBlock Grid.Row="8" Text="Repository URL (clone)" FontWeight="SemiBold" Margin="0,0,0,4"/>
-    <TextBox x:Name="UrlTextBox" Grid.Row="9" FontSize="13" Padding="6" Height="64" TextWrapping="Wrap" AcceptsReturn="False" VerticalScrollBarVisibility="Auto"/>
-    <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-      <Button x:Name="OkButton" Content="OK" Width="100" Margin="0,0,8,0" Padding="14,6" IsDefault="True"/>
-      <Button x:Name="CancelButton" Content="Cancel" Width="100" Padding="14,6"/>
-    </StackPanel>
-    <TextBlock x:Name="StatusText" Grid.Row="10" VerticalAlignment="Bottom" HorizontalAlignment="Left"
-               Foreground="#333" TextWrapping="Wrap" MaxWidth="420" Margin="0,0,0,36"/>
   </Grid>
 </Window>
 '@
@@ -450,68 +791,85 @@ function Show-InitGitRepositoryUrlDialog {
     $window = [Windows.Markup.XamlReader]::Load($reader)
     $window.Title = $DialogTitle
 
+    $urlTextBox = $window.FindName('UrlTextBox')
+    $optionalExpander = $window.FindName('OptionalExpander')
     $providerCombo = $window.FindName('ProviderCombo')
-    $profileCombo = $window.FindName('ProfileCombo')
+    $orgRow = $window.FindName('OrgRow')
     $orgTextBox = $window.FindName('OrgTextBox')
     $apiBaseTextBox = $window.FindName('ApiBaseTextBox')
     $patBox = $window.FindName('PatPasswordBox')
     $testConnButton = $window.FindName('TestConnButton')
     $saveProfileButton = $window.FindName('SaveProfileButton')
-    $loadReposButton = $window.FindName('LoadReposButton')
+    $loadReposTopButton = $window.FindName('LoadReposTopButton')
     $loadMoreButton = $window.FindName('LoadMoreButton')
-    $repoHintText = $window.FindName('RepoHintText')
     $repoCombo = $window.FindName('RepoCombo')
     $repoCombo.DisplayMemberPath = 'Name'
-    $urlTextBox = $window.FindName('UrlTextBox')
     $okButton = $window.FindName('OkButton')
     $cancelButton = $window.FindName('CancelButton')
     $statusText = $window.FindName('StatusText')
+    $envPatHint = $window.FindName('EnvPatHint')
+    $savedProfileCombo = $window.FindName('SavedProfileCombo')
 
     [void]$providerCombo.Items.Add('GitHub')
     [void]$providerCombo.Items.Add('Azure DevOps')
-    $providerCombo.SelectedIndex = 0
+    $providerCombo.SelectedItem = 'Azure DevOps'
+    $apiBaseTextBox.Text = $apiDefault
+    $orgTextBox.Text = Get-InitGitDefaultAzureOrganization
 
-    $apiBaseTextBox.Text = 'https://api.github.com'
-
-    $dialogProfiles = [System.Collections.ArrayList]::new()
-    foreach ($p in $allProfiles) { [void]$dialogProfiles.Add($p) }
-
-    $pickerState = @{
-        NextGitHubUri = [string]$null
-        NextAzToken   = [string]$null
+    if ([string]::IsNullOrWhiteSpace($DefaultUrl)) {
+        $urlTextBox.Text = Get-InitGitDefaultRepositoryUrl
+    } else {
+        $urlTextBox.Text = $DefaultUrl
     }
 
-    $repoList = [System.Collections.Generic.List[object]]::new()
-
-    foreach ($p in $dialogProfiles) {
-        [void]$profileCombo.Items.Add($p.DisplayName)
-    }
-    if ($profileCombo.Items.Count -gt 0) { $profileCombo.SelectedIndex = 0 }
-
-    $urlTextBox.Text = $DefaultUrl
-
-    function Get-SelectedProfileObject {
-        $idx = $profileCombo.SelectedIndex
-        if ($idx -lt 0 -or $idx -ge $dialogProfiles.Count) { return $null }
-        return $dialogProfiles[$idx]
+    function Get-ProviderKind {
+        if ($providerCombo.SelectedItem -eq 'Azure DevOps') { return 'AzureDevOps' }
+        return 'GitHub'
     }
 
     function Get-EffectivePat {
-        $prof = Get-SelectedProfileObject
-        $fromEnv = Get-InitGitPatForProfile -Profile $prof
-        if ($fromEnv) { return $fromEnv }
-        return $patBox.Password
+        $typed = ''
+        try { $typed = $patBox.Password } catch { }
+        return Resolve-InitGitPat -TypedPat $typed -Provider (Get-ProviderKind)
+    }
+
+    function Update-EnvPatHint {
+        $hints = @()
+        if ($env:GITHUB_TOKEN) { $hints += 'GITHUB_TOKEN is set (used when Token field is empty).' }
+        if ($env:AZURE_DEVOPS_EXT_PAT) { $hints += 'AZURE_DEVOPS_EXT_PAT is set (used when Token field is empty).' }
+        $envPatHint.Text = if ($hints.Count -gt 0) { ($hints -join ' ') } else { '' }
+    }
+
+    function Refresh-SavedProfileCombo {
+        $script:savedProfilesByName = @{}
+        $savedProfileCombo.Items.Clear()
+        [void]$savedProfileCombo.Items.Add('(none)')
+        foreach ($p in (Get-InitGitSavedProfiles)) {
+            $script:savedProfilesByName[$p.DisplayName] = $p
+            [void]$savedProfileCombo.Items.Add($p.DisplayName)
+        }
+        $savedProfileCombo.SelectedIndex = 0
+    }
+
+    function Sync-ProviderFromUrl {
+        $t = $urlTextBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($t)) { return }
+        $kind = Get-InitGitRepoProviderType -UrlOrEmpty $t
+        if ($kind -eq 'AzureDevOps') {
+            $providerCombo.SelectedItem = 'Azure DevOps'
+            if (-not $orgTextBox.Text.Trim()) {
+                $m = [regex]::Match($t, 'dev\.azure\.com/([^/]+)/', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($m.Success) { $orgTextBox.Text = $m.Groups[1].Value }
+            }
+        } elseif ($kind -eq 'GitHub') {
+            $providerCombo.SelectedItem = 'GitHub'
+        }
     }
 
     function Update-ProviderUi {
         $isAz = ($providerCombo.SelectedItem -eq 'Azure DevOps')
+        $orgRow.Visibility = if ($isAz) { 'Visible' } else { 'Collapsed' }
         $orgTextBox.IsEnabled = $isAz
-        $apiBaseTextBox.IsEnabled = -not $isAz
-        if ($isAz) {
-            if (-not $orgTextBox.Text -and $env:AZURE_DEVOPS_ORG) {
-                $orgTextBox.Text = $env:AZURE_DEVOPS_ORG
-            }
-        }
     }
 
     function Set-Status {
@@ -519,20 +877,37 @@ function Show-InitGitRepositoryUrlDialog {
         $statusText.Text = $Text
     }
 
-    $profileCombo.Add_SelectionChanged({ Update-ProviderUi })
+    $urlTextBox.Add_LostFocus({ Sync-ProviderFromUrl })
+    $savedProfileCombo.Add_SelectionChanged({
+            $name = [string]$savedProfileCombo.SelectedItem
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -eq '(none)') { return }
+            $p = $script:savedProfilesByName[$name]
+            if (-not $p) { return }
+            if ($p.Provider -eq 'AzureDevOps') {
+                $providerCombo.SelectedItem = 'Azure DevOps'
+            } else {
+                $providerCombo.SelectedItem = 'GitHub'
+            }
+            if ($p.Org) { $orgTextBox.Text = $p.Org }
+            if ($p.ApiBase) { $apiBaseTextBox.Text = $p.ApiBase }
+            Update-ProviderUi
+        })
+
     $providerCombo.Add_SelectionChanged({
             Update-ProviderUi
+            Update-EnvPatHint
+            $pickerState.LoadGeneration++
             $repoList.Clear()
             $repoCombo.Items.Clear()
             $pickerState.NextGitHubUri = $null
             $pickerState.NextAzToken = $null
             $loadMoreButton.IsEnabled = $false
-            Set-Status -Text 'Provider changed. Load repositories again.'
+            Set-Status -Text ''
         })
 
     $repoCombo.Add_SelectionChanged({
             $si = $repoCombo.SelectedItem
-            if ($si -and ($si -is [pscustomobject] -or $si.PSObject.Properties['CloneUrl'])) {
+            if ($si -and ($si.PSObject.Properties['CloneUrl'])) {
                 $cu = $si.CloneUrl
                 if ($cu) { $urlTextBox.Text = [string]$cu }
             }
@@ -543,16 +918,17 @@ function Show-InitGitRepositoryUrlDialog {
             try {
                 $pat = Get-EffectivePat
                 if ($providerCombo.SelectedItem -eq 'GitHub') {
-                    if ([string]::IsNullOrWhiteSpace($pat)) { throw 'Enter PAT or select env profile with GITHUB_TOKEN.' }
+                    if ([string]::IsNullOrWhiteSpace($pat)) { throw 'Enter a token or set GITHUB_TOKEN.' }
                     $h = @{ Authorization = "Bearer $pat"; 'User-Agent' = 'InitGit' }
                     $null = Invoke-RestMethod -Uri "$( $apiBaseTextBox.Text.TrimEnd('/') )/user" -Headers $h -Method Get -ErrorAction Stop
                     Set-Status -Text 'GitHub: connection OK.'
                 } else {
-                    if ([string]::IsNullOrWhiteSpace($pat)) { throw 'Enter PAT or env AZURE_DEVOPS_EXT_PAT.' }
+                    if ([string]::IsNullOrWhiteSpace($pat)) { throw 'Enter a token or set AZURE_DEVOPS_EXT_PAT.' }
                     $org = $orgTextBox.Text.Trim()
-                    if (-not $org) { throw 'Enter Azure DevOps organization name.' }
+                    if (-not $org) { throw 'Enter your Azure DevOps organization name.' }
+                    $orgEnc = [Uri]::EscapeDataString($org)
                     $pair = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":${pat}"))
-                    $uri = "https://dev.azure.com/$org/_apis/projects?api-version=7.0&`$top=1"
+                    $uri = "https://dev.azure.com/$orgEnc/_apis/projects?api-version=7.0&`$top=1"
                     $null = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Basic $pair" } -Method Get -ErrorAction Stop
                     Set-Status -Text 'Azure DevOps: connection OK.'
                 }
@@ -563,110 +939,171 @@ function Show-InitGitRepositoryUrlDialog {
 
     $saveProfileButton.Add_Click({
             Add-Type -AssemblyName Microsoft.VisualBasic
-            $name = [Microsoft.VisualBasic.Interaction]::InputBox('Display name for this profile', 'Save profile', 'My account')
+            $name = [Microsoft.VisualBasic.Interaction]::InputBox('Profile display name (token is never saved to disk)', 'Save profile', 'My account')
             if ([string]::IsNullOrWhiteSpace($name)) { return }
-            $newId = [guid]::NewGuid().ToString('n')
-            $prov = if ($providerCombo.SelectedItem -eq 'Azure DevOps') { 'AzureDevOps' } else { 'GitHub' }
-            $newProf = [pscustomobject]@{
-                Id          = $newId
-                DisplayName = $name.Trim()
-                Provider    = $prov
-                Org         = $orgTextBox.Text.Trim()
-                ApiBase     = $apiBaseTextBox.Text.Trim()
-                FromEnv     = $false
-            }
-            [void]$dialogProfiles.Add($newProf)
-            [void]$profileCombo.Items.Add($newProf.DisplayName)
-            $profileCombo.SelectedIndex = $profileCombo.Items.Count - 1
-            $savedList = Get-InitGitSavedProfiles
-            $savedList = @($savedList) + @([pscustomobject]@{
-                    Id = $newId; DisplayName = $newProf.DisplayName; Provider = $prov
-                    Org = $newProf.Org; ApiBase = $newProf.ApiBase; FromEnv = $false
-                })
-            Save-InitGitSavedProfiles -Profiles $savedList
-            Set-Status -Text 'Profile saved (PAT is not stored in the file; paste PAT again next time or use env vars).'
+            $prov = Get-ProviderKind
+            Add-InitGitSavedProfile -DisplayName $name -Provider $prov -Org $orgTextBox.Text.Trim() -ApiBase $apiBaseTextBox.Text.Trim()
+            Refresh-SavedProfileCombo
+            $savedProfileCombo.SelectedItem = $name.Trim()
+            Set-Status -Text 'Saved profile name (token not stored).'
         })
 
-    function Invoke-LoadReposPage {
-        param([bool]$Append)
+    function Resolve-AzureDevOpsPatForLoad {
+        $org = $orgTextBox.Text.Trim()
+        if (-not $org) {
+            $orgTextBox.Text = Get-InitGitDefaultAzureOrganization
+            $org = $orgTextBox.Text.Trim()
+        }
+        $pat = Get-EffectivePat
+        if ([string]::IsNullOrWhiteSpace($pat)) {
+            $pat = Get-InitGitPatFromGitCredentialManager -Username $org
+        }
+        if ([string]::IsNullOrWhiteSpace($pat)) {
+            $pat = Show-InitGitAzurePatDialog -Organization $org
+            if ([string]::IsNullOrWhiteSpace($pat)) { return $null }
+            $saved = Save-InitGitAzureDevOpsPatToCredentialManager -Pat $pat -Organization $org
+            if ($saved) {
+                Set-Status -Text 'Token saved to Git Credential Manager.'
+            } else {
+                Set-Status -Text 'Token accepted but could not save to Git Credential Manager; listing will still work this session.'
+            }
+            try { $patBox.Password = $pat } catch { }
+        }
+        return $pat
+    }
+
+    function Invoke-LoadRepositories {
+        $providerCombo.SelectedItem = 'Azure DevOps'
+        Update-ProviderUi
+        $optionalExpander.IsExpanded = $true
+        Sync-ProviderFromUrl
+
+        $provKind = Get-ProviderKind
+        $pat = $null
+        if ($provKind -eq 'AzureDevOps') {
+            $pat = Resolve-AzureDevOpsPatForLoad
+            if ([string]::IsNullOrWhiteSpace($pat)) {
+                if (-not $statusText.Text) {
+                    Set-Status -Text 'A personal access token is required to load repositories.'
+                }
+                return
+            }
+        } else {
+            $pat = Get-EffectivePat
+            if ([string]::IsNullOrWhiteSpace($pat)) {
+                Set-Status -Text 'Enter a token (or set GITHUB_TOKEN).'
+                return
+            }
+        }
+        Start-AsyncRepoLoad -Append $false -PatOverride $pat
+    }
+
+    function Start-AsyncRepoLoad {
+        param(
+            [bool]$Append,
+            [string]$PatOverride = $null
+        )
+
         if (-not $Append) {
             $repoList.Clear()
             $repoCombo.Items.Clear()
             $pickerState.NextGitHubUri = $null
             $pickerState.NextAzToken = $null
         }
-        $pat = Get-EffectivePat
-        if ($providerCombo.SelectedItem -eq 'Azure DevOps') {
-            $org = $orgTextBox.Text.Trim()
+
+        $provKind = Get-ProviderKind
+        $pat = if (-not [string]::IsNullOrWhiteSpace($PatOverride)) { $PatOverride } else { Get-EffectivePat }
+        $org = $orgTextBox.Text.Trim()
+        $apiBase = $apiBaseTextBox.Text.Trim()
+
+        if ($provKind -eq 'AzureDevOps') {
             if (-not $org) {
-                Set-Status -Text 'Enter Azure DevOps organization.'
+                Set-Status -Text 'Enter your Azure DevOps organization.'
                 return
             }
             if ([string]::IsNullOrWhiteSpace($pat)) {
-                Set-Status -Text 'Enter PAT (or use AZURE_DEVOPS_EXT_PAT).'
-                return
+                $pat = Resolve-AzureDevOpsPatForLoad
+                if ([string]::IsNullOrWhiteSpace($pat)) { return }
             }
-            try {
-                $page = Invoke-InitGitAzureDevOpsReposPage -Organization $org -Pat $pat -ContinuationToken $pickerState.NextAzToken
-                foreach ($r in $page.Repos) {
-                    $repoList.Add($r) | Out-Null
-                    [void]$repoCombo.Items.Add($r)
+        } elseif ([string]::IsNullOrWhiteSpace($pat)) {
+            Set-Status -Text 'Enter a token (or set GITHUB_TOKEN).'
+            return
+        }
+
+        $gen = ++$pickerState.LoadGeneration
+        $loadReposTopButton.IsEnabled = $false
+        $loadMoreButton.IsEnabled = $false
+        Set-Status -Text 'Loading repositories...'
+
+        $nextGh = $pickerState.NextGitHubUri
+        $nextAz = $pickerState.NextAzToken
+
+        $task = [System.Threading.Tasks.Task]::Run({
+                Get-InitGitRepoListPage -Provider $provKind -Pat $pat -ApiBase $apiBase -Organization $org `
+                    -NextGitHubUri $nextGh -NextAzToken $nextAz
+            })
+
+        $null = $task.ContinueWith({
+                param($t)
+                $page = $null
+                if ($t.IsFaulted) {
+                    $err = $t.Exception.InnerException
+                    if (-not $err) { $err = $t.Exception }
+                    $page = @{ Ok = $false; Error = $err.Message; Repos = @() }
+                } else {
+                    $page = $t.Result
                 }
-                $pickerState.NextAzToken = $page.ContinuationToken
-                $loadMoreButton.IsEnabled = -not [string]::IsNullOrWhiteSpace($pickerState.NextAzToken)
-                Set-Status -Text ("Loaded " + $page.Repos.Count + " repositories (Azure).")
-            } catch {
-                Set-Status -Text $_.Exception.Message
-            }
-            return
-        }
-        if ([string]::IsNullOrWhiteSpace($pat)) {
-            Set-Status -Text 'Enter PAT (or use GITHUB_TOKEN profile).'
-            return
-        }
-        try {
-            $page = Invoke-InitGitGitHubUserReposPage -Pat $pat -ApiBase $apiBaseTextBox.Text.Trim() -NextUri $pickerState.NextGitHubUri
-            foreach ($r in $page.Repos) {
-                $repoList.Add($r) | Out-Null
-                [void]$repoCombo.Items.Add($r)
-            }
-            $pickerState.NextGitHubUri = $page.NextUri
-            $loadMoreButton.IsEnabled = -not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)
-            Set-Status -Text ("Loaded " + $page.Repos.Count + " repositories (GitHub). More: " + (-not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)))
-        } catch {
-            Set-Status -Text $_.Exception.Message
-        }
+                $window.Dispatcher.BeginInvoke([action]{
+                        if ($pickerState.LoadGeneration -ne $gen) { return }
+
+                        $loadReposTopButton.IsEnabled = $true
+
+                        if (-not $page.Ok) {
+                            Set-Status -Text $page.Error
+                            $loadMoreButton.IsEnabled = $false
+                            return
+                        }
+
+                        foreach ($r in $page.Repos) {
+                            $repoList.Add($r) | Out-Null
+                            [void]$repoCombo.Items.Add($r)
+                        }
+                        $pickerState.NextGitHubUri = $page.NextGitHubUri
+                        $pickerState.NextAzToken = $page.NextAzToken
+                        $hasMore = (-not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)) -or (-not [string]::IsNullOrWhiteSpace($pickerState.NextAzToken))
+                        $loadMoreButton.IsEnabled = $hasMore
+                        $count = @($page.Repos).Count
+                        $suffix = if ($hasMore) { ' Click Load more for the next page.' } else { '' }
+                        Set-Status -Text ("Loaded $count repositories.$suffix")
+                    }) | Out-Null
+            })
     }
 
-    $loadReposButton.Add_Click({
-            $loadReposButton.IsEnabled = $false
-            $window.Dispatcher.Invoke([action] { }, 'Render', $null, $null) | Out-Null
-            try {
-                Invoke-LoadReposPage -Append $false
-            } finally {
-                $loadReposButton.IsEnabled = $true
-            }
-        })
+    $loadReposTopButton.Add_Click({ Invoke-LoadRepositories })
 
     $loadMoreButton.Add_Click({
-            $loadMoreButton.IsEnabled = $false
-            try {
-                Invoke-LoadReposPage -Append $true
-            } finally {
-                $loadMoreButton.IsEnabled = (-not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)) -or (-not [string]::IsNullOrWhiteSpace($pickerState.NextAzToken))
+            $pat = $null
+            if ((Get-ProviderKind) -eq 'AzureDevOps') {
+                $pat = Resolve-AzureDevOpsPatForLoad
+                if ([string]::IsNullOrWhiteSpace($pat)) { return }
             }
+            Start-AsyncRepoLoad -Append $true -PatOverride $pat
         })
 
     $okButton.Add_Click({
             if ([string]::IsNullOrWhiteSpace($urlTextBox.Text)) {
-                Set-Status -Text 'Enter a repository URL.'
+                Set-Status -Text 'Enter a clone URL, or open Optional and pick from your account.'
                 return
             }
             $window.DialogResult = $true
         })
     $cancelButton.Add_Click({ $window.DialogResult = $false })
 
+    Refresh-SavedProfileCombo
+    Update-EnvPatHint
+    Sync-ProviderFromUrl
     Update-ProviderUi
+    Set-Status -Text ''
 
     $null = $window.ShowDialog()
     if ($window.DialogResult -eq $true) {
@@ -691,6 +1128,12 @@ function Show-InitGitYesNoMessage {
 
 # Back-compat alias
 function Get-RepositoryUrlFromDialog {
-    param([string]$DefaultUrl = '', [string]$DialogTitle = 'Repository URL')
+    param(
+        [string]$DefaultUrl = '',
+        [string]$DialogTitle = 'Repository URL'
+    )
+    if ([string]::IsNullOrWhiteSpace($DefaultUrl)) {
+        $DefaultUrl = Get-InitGitDefaultRepositoryUrl
+    }
     return Show-InitGitRepositoryUrlDialog -DefaultUrl $DefaultUrl -DialogTitle $DialogTitle
 }

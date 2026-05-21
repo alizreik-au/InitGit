@@ -135,7 +135,9 @@ try {
     # Pre-clone disk check (rough; LFS not estimated)
     $free = Get-InitGitDriveFreeBytes -Path $parentDir
     $minB = Get-InitGitMinFreeBytesThreshold
-    if ($free -ge 0 -and $free -lt $minB) {
+    if ($free -lt 0) {
+        Write-Host "Could not read free disk space on the destination drive; continuing anyway." -ForegroundColor Gray
+    } elseif ($free -lt $minB) {
         if (-not (Show-InitGitLowDiskSpaceDialog -FreeBytes $free -MinBytes $minB)) {
             Write-Host "Cancelled (low disk space)." -ForegroundColor Yellow
             pause
@@ -157,7 +159,7 @@ try {
     Write-Host "Cloning repository (all branches will be fetched; initial checkout: $($selectedBranch.BranchName))..."
     Push-Location -LiteralPath $parentDir
     try {
-        git clone --branch $selectedBranch.BranchName $url
+        & git clone --branch $selectedBranch.BranchName -- $url
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Clone failed." -ForegroundColor Red
             pause

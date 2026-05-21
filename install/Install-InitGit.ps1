@@ -49,10 +49,13 @@ if (-not (Test-Path -LiteralPath $ScriptsSourceDir -PathType Container)) {
     exit 1
 }
 
+$preserveNames = @('UserData')
 if (Test-Path -LiteralPath $InstallDir -PathType Container) {
-    Write-Host "Updating existing installation: removing old files..." -ForegroundColor Gray
-    Get-ChildItem -LiteralPath $InstallDir -Force | Remove-Item -Recurse -Force
-    Write-Host "  Cleared: $InstallDir" -ForegroundColor Green
+    Write-Host "Updating existing installation: removing old files (preserving UserData)..." -ForegroundColor Gray
+    Get-ChildItem -LiteralPath $InstallDir -Force |
+        Where-Object { $preserveNames -notcontains $_.Name } |
+        Remove-Item -Recurse -Force
+    Write-Host "  Cleared install files under: $InstallDir" -ForegroundColor Green
 } else {
     New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
     Write-Host "Created: $InstallDir" -ForegroundColor Green
@@ -260,6 +263,7 @@ Write-Host ""
 
 # Wait for prerequisite JSON (written by parallel child)
 $prereq = $null
+$prereqTimedOut = $false
 if (Test-Path -LiteralPath $checkScriptSource) {
     $deadline = (Get-Date).AddSeconds(120)
     while ((Get-Date) -lt $deadline) {
@@ -272,7 +276,18 @@ if (Test-Path -LiteralPath $checkScriptSource) {
         }
         Start-Sleep -Milliseconds 200
     }
+    if ($null -eq $prereq -or $null -eq $prereq.GitPresent) {
+        $prereqTimedOut = $true
+        Write-Host "Prerequisite check did not finish within 120 seconds." -ForegroundColor Yellow
+        Show-InitGitInstallerMessage -Message @"
+Could not verify Git, Git LFS, or Git Credential Manager in time.
+
+Install Git from https://git-scm.com/download/win if clone or init fails. You can run this installer again to retry winget installs.
+"@
+    }
 }
+
+$checkScriptInstalled = Join-Path -Path $InstallDir -ChildPath 'Check-InitGit-Prerequisites.ps1'
 
 $wingetOk = $false
 try {
@@ -280,25 +295,53 @@ try {
     if ($LASTEXITCODE -eq 0) { $wingetOk = $true }
 } catch { }
 
-if ($prereq) {
-    $missing = @()
+$missing = @()
+if ($prereqTimedOut -and -not $prereq) {
+    $missing += 'Could not verify Git or Git LFS (check timed out).'
+} elseif ($prereq) {
     if (-not $prereq.GitPresent) { $missing += 'Git is missing or not on PATH.' }
     if (-not $prereq.LfsPresent) { $missing += 'Git LFS is missing.' }
     if (-not $prereq.GcmPresent) { $missing += 'Git Credential Manager was not detected.' }
     foreach ($m in $prereq.Messages) { if ($m) { $missing += [string]$m } }
+}
+$missing = @($missing | Select-Object -Unique)
 
-    $missing = @($missing | Select-Object -Unique)
+if ($missing.Count -gt 0) {
+    $doInstall = Show-InitGitPrerequisitesInstallDialog -MissingLines $missing -WingetAvailable:$wingetOk
+    if ($doInstall -and $wingetOk) {
+        $needGit = if ($prereq) { -not $prereq.GitPresent } else { $true }
+        $needLfs = if ($prereq) { -not $prereq.LfsPresent } else { $true }
+        $needGcm = if ($prereq) { -not $prereq.GcmPresent } else { $false }
 
-    if ($missing.Count -gt 0) {
-        $doInstall = Show-InitGitPrerequisitesInstallDialog -MissingLines $missing -WingetAvailable:$wingetOk
-        if ($doInstall -and $wingetOk) {
-            Invoke-InitGitWingetInstallMissing -NeedGit:(-not $prereq.GitPresent) -NeedLfs:(-not $prereq.LfsPresent) -NeedGcm:(-not $prereq.GcmPresent)
+        if ($needGit) {
+            $wingetResult = Invoke-InitGitWingetInstallMissing -NeedGit $true -NeedLfs $false -NeedGcm $false
             Update-InitGitSessionPathFromMachine
-            Write-Host "winget installs finished (or were cancelled). If tools are still missing, open a new PowerShell window and run this installer again." -ForegroundColor Yellow
-        } elseif (-not $wingetOk) {
-            Show-InitGitInstallerMessage -Message ("Missing: `n- " + ($missing -join "`n- ") + "`n`nInstall Git from https://git-scm.com/download/win and Git LFS from https://git-lfs.com when ready.")
+            $prereq = Invoke-InitGitRunPrerequisiteCheck -CheckScriptPath $checkScriptInstalled
+            if (-not $wingetResult.Success) {
+                Write-Host "winget Git install exited with code $($wingetResult.ExitCode) (cancelled or failed)." -ForegroundColor Yellow
+            }
+            if ($prereq -and $prereq.GcmPresent) { $needGcm = $false }
+            $needLfs = if ($prereq) { -not $prereq.LfsPresent } else { $needLfs }
+            $needGcm = if ($prereq) { -not $prereq.GcmPresent } else { $needGcm }
         }
+
+        if ($needLfs -or $needGcm) {
+            $wingetResult = Invoke-InitGitWingetInstallMissing -NeedGit $false -NeedLfs:$needLfs -NeedGcm:$needGcm
+            Update-InitGitSessionPathFromMachine
+            $prereq = Invoke-InitGitRunPrerequisiteCheck -CheckScriptPath $checkScriptInstalled
+            if (-not $wingetResult.Success) {
+                Write-Host "winget install exited with code $($wingetResult.ExitCode) (cancelled or failed)." -ForegroundColor Yellow
+            }
+        }
+
+        Write-Host "winget installs finished (or were cancelled). If tools are still missing, open a new PowerShell window and run this installer again." -ForegroundColor Yellow
+    } elseif (-not $wingetOk) {
+        Show-InitGitInstallerMessage -Message ("Missing: `n- " + ($missing -join "`n- ") + "`n`nInstall Git from https://git-scm.com/download/win and Git LFS from https://git-lfs.com when ready.")
     }
+}
+
+if (Test-Path -LiteralPath $prereqResultPath) {
+    Remove-Item -LiteralPath $prereqResultPath -Force -ErrorAction SilentlyContinue
 }
 
 if (Show-InitGitContextMenuRegDialog) {

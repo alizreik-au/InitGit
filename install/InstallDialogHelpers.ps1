@@ -76,6 +76,36 @@ You can run Add-InitGit-Context-Menu.bat later from the install folder if you sk
     return ($r -eq 'Yes')
 }
 
+function Invoke-InitGitRunPrerequisiteCheck {
+    <#
+    .SYNOPSIS
+        Runs Check-InitGit-Prerequisites.ps1 synchronously and returns parsed JSON or $null.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$CheckScriptPath
+    )
+    if (-not (Test-Path -LiteralPath $CheckScriptPath -PathType Leaf)) { return $null }
+    $resultPath = Join-Path -Path $env:TEMP -ChildPath ("InitGit-prereq-" + [guid]::NewGuid().ToString('n') + '.json')
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CheckScriptPath -ResultPath $resultPath | Out-Null
+        if (-not (Test-Path -LiteralPath $resultPath)) { return $null }
+        $raw = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 -ErrorAction Stop
+        $obj = $raw | ConvertFrom-Json
+        if ($null -eq $obj.GitPresent) { return $null }
+        return $obj
+    } catch {
+        return $null
+    } finally {
+        if (Test-Path -LiteralPath $resultPath) {
+            Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+        }
+        $draft = "$resultPath.draft"
+        if (Test-Path -LiteralPath $draft) {
+            Remove-Item -LiteralPath $draft -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-InitGitWingetInstallMissing {
     param(
         [bool]$NeedGit,
@@ -92,17 +122,22 @@ function Invoke-InitGitWingetInstallMissing {
     if ($NeedGcm) {
         $parts += 'winget install -e --id Microsoft.GitCredentialManagerCore --source winget --accept-package-agreements --accept-source-agreements --scope user'
     }
-    if ($parts.Count -eq 0) { return }
+    if ($parts.Count -eq 0) {
+        return @{ Success = $true; ExitCode = 0 }
+    }
     $body = ($parts -join "`r`n") + "`r`n" + 'exit $LASTEXITCODE' + "`r`n"
     $tmp = Join-Path -Path $env:TEMP -ChildPath ("InitGit-winget-" + [guid]::NewGuid().ToString('n') + '.ps1')
+    $exitCode = 1
     try {
         Set-Content -LiteralPath $tmp -Value $body -Encoding UTF8
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @(
+        $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp
-        ) -Wait
+        ) -Wait -PassThru
+        if ($proc) { $exitCode = $proc.ExitCode }
     } finally {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
+    return @{ Success = ($exitCode -eq 0); ExitCode = $exitCode }
 }
 
 function Update-InitGitSessionPathFromMachine {
