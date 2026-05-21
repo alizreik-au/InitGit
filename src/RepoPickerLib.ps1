@@ -444,6 +444,96 @@ function Get-InitGitRepoListPage {
     }
 }
 
+function New-InitGitRepoListPageRequest {
+    param(
+        [ValidateSet('GitHub', 'AzureDevOps')]
+        [string]$Provider,
+        [Parameter(Mandatory)][string]$Pat,
+        [string]$ApiBase = 'https://api.github.com',
+        [string]$Organization = '',
+        [string]$NextGitHubUri = $null,
+        [string]$NextAzToken = $null
+    )
+    return @{
+        Provider       = $Provider
+        Pat            = $Pat
+        ApiBase        = $ApiBase
+        Organization   = $Organization
+        NextGitHubUri  = $NextGitHubUri
+        NextAzToken    = $NextAzToken
+    }
+}
+
+function Start-InitGitRepoListPageBackground {
+    <#
+    .SYNOPSIS
+        Fetches one repo list page on a background thread; invokes OnComplete on the UI dispatcher.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Request,
+        [Parameter(Mandatory)][System.Windows.Threading.Dispatcher]$Dispatcher,
+        [Parameter(Mandatory)][scriptblock]$OnComplete
+    )
+    $bw = New-Object System.ComponentModel.BackgroundWorker
+    $bw.DoWork += {
+        param($sender, $e)
+        $r = $e.Argument
+        $e.Result = Get-InitGitRepoListPage -Provider $r.Provider -Pat $r.Pat -ApiBase $r.ApiBase `
+            -Organization $r.Organization -NextGitHubUri $r.NextGitHubUri -NextAzToken $r.NextAzToken
+    }
+    $bw.RunWorkerCompleted += {
+        param($sender, $e)
+        $page = if ($e.Error) {
+            @{ Ok = $false; Error = $e.Error.Message; Repos = @(); NextGitHubUri = $null; NextAzToken = $null }
+        } elseif ($e.Cancelled) {
+            @{ Ok = $false; Error = 'Cancelled'; Repos = @(); NextGitHubUri = $null; NextAzToken = $null }
+        } else {
+            $e.Result
+        }
+        $null = $Dispatcher.BeginInvoke([action]{ & $OnComplete $page })
+    }
+    $bw.RunWorkerAsync($Request)
+    return $bw
+}
+
+function Get-InitGitPatForRepoLoad {
+    <#
+    .SYNOPSIS
+        Resolves PAT for repo listing: typed, env, GCM, then Azure PAT dialog + GCM store.
+    #>
+    [OutputType([string])]
+    param(
+        [ValidateSet('GitHub', 'AzureDevOps')]
+        [string]$Provider,
+        [string]$TypedPat = '',
+        [string]$Organization = '',
+        [scriptblock]$OnStatus = $null,
+        [scriptblock]$OnPatAcquired = $null
+    )
+    $pat = Resolve-InitGitPat -TypedPat $TypedPat -Provider $Provider
+    if ($Provider -eq 'GitHub') { return $pat }
+
+    $org = if ([string]::IsNullOrWhiteSpace($Organization)) { Get-InitGitDefaultAzureOrganization } else { $Organization.Trim() }
+    if ([string]::IsNullOrWhiteSpace($pat)) {
+        $pat = Get-InitGitPatFromGitCredentialManager -Username $org
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pat)) { return $pat }
+
+    $pat = Show-InitGitAzurePatDialog -Organization $org
+    if ([string]::IsNullOrWhiteSpace($pat)) { return $null }
+
+    $saved = Save-InitGitAzureDevOpsPatToCredentialManager -Pat $pat -Organization $org
+    if ($OnStatus) {
+        if ($saved) {
+            & $OnStatus 'Token saved to Git Credential Manager.'
+        } else {
+            & $OnStatus 'Token accepted but could not save to Git Credential Manager; listing will still work this session.'
+        }
+    }
+    if ($OnPatAcquired) { & $OnPatAcquired $pat }
+    return $pat
+}
+
 function Merge-InitGitProfileLists {
     [OutputType([object[]])]
     param(
@@ -948,61 +1038,53 @@ function Show-InitGitRepositoryUrlDialog {
             Set-Status -Text 'Saved profile name (token not stored).'
         })
 
-    function Resolve-AzureDevOpsPatForLoad {
+    function Apply-InitGitRepoListPage {
+        param(
+            [hashtable]$Page,
+            [int]$Generation
+        )
+        $loadReposTopButton.IsEnabled = $true
+        if ($pickerState.LoadGeneration -ne $Generation) { return }
+
+        if (-not $Page.Ok) {
+            Set-Status -Text $Page.Error
+            $loadMoreButton.IsEnabled = $false
+            return
+        }
+
+        foreach ($r in $Page.Repos) {
+            $repoList.Add($r) | Out-Null
+            [void]$repoCombo.Items.Add($r)
+        }
+        $pickerState.NextGitHubUri = $Page.NextGitHubUri
+        $pickerState.NextAzToken = $Page.NextAzToken
+        $hasMore = (-not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)) -or (-not [string]::IsNullOrWhiteSpace($pickerState.NextAzToken))
+        $loadMoreButton.IsEnabled = $hasMore
+        $count = @($Page.Repos).Count
+        $suffix = if ($hasMore) { ' Click Load more for the next page.' } else { '' }
+        Set-Status -Text ("Loaded $count repositories.$suffix")
+    }
+
+    function Begin-RepoListFetch {
+        param(
+            [bool]$Append,
+            [string]$Pat
+        )
+
+        $provKind = Get-ProviderKind
         $org = $orgTextBox.Text.Trim()
-        if (-not $org) {
+        if ($provKind -eq 'AzureDevOps' -and -not $org) {
             $orgTextBox.Text = Get-InitGitDefaultAzureOrganization
             $org = $orgTextBox.Text.Trim()
         }
-        $pat = Get-EffectivePat
-        if ([string]::IsNullOrWhiteSpace($pat)) {
-            $pat = Get-InitGitPatFromGitCredentialManager -Username $org
+        if ($provKind -eq 'AzureDevOps' -and -not $org) {
+            Set-Status -Text 'Enter your Azure DevOps organization.'
+            return
         }
-        if ([string]::IsNullOrWhiteSpace($pat)) {
-            $pat = Show-InitGitAzurePatDialog -Organization $org
-            if ([string]::IsNullOrWhiteSpace($pat)) { return $null }
-            $saved = Save-InitGitAzureDevOpsPatToCredentialManager -Pat $pat -Organization $org
-            if ($saved) {
-                Set-Status -Text 'Token saved to Git Credential Manager.'
-            } else {
-                Set-Status -Text 'Token accepted but could not save to Git Credential Manager; listing will still work this session.'
-            }
-            try { $patBox.Password = $pat } catch { }
+        if ([string]::IsNullOrWhiteSpace($Pat)) {
+            Set-Status -Text 'A personal access token is required to load repositories.'
+            return
         }
-        return $pat
-    }
-
-    function Invoke-LoadRepositories {
-        $providerCombo.SelectedItem = 'Azure DevOps'
-        Update-ProviderUi
-        $optionalExpander.IsExpanded = $true
-        Sync-ProviderFromUrl
-
-        $provKind = Get-ProviderKind
-        $pat = $null
-        if ($provKind -eq 'AzureDevOps') {
-            $pat = Resolve-AzureDevOpsPatForLoad
-            if ([string]::IsNullOrWhiteSpace($pat)) {
-                if (-not $statusText.Text) {
-                    Set-Status -Text 'A personal access token is required to load repositories.'
-                }
-                return
-            }
-        } else {
-            $pat = Get-EffectivePat
-            if ([string]::IsNullOrWhiteSpace($pat)) {
-                Set-Status -Text 'Enter a token (or set GITHUB_TOKEN).'
-                return
-            }
-        }
-        Start-AsyncRepoLoad -Append $false -PatOverride $pat
-    }
-
-    function Start-AsyncRepoLoad {
-        param(
-            [bool]$Append,
-            [string]$PatOverride = $null
-        )
 
         if (-not $Append) {
             $repoList.Clear()
@@ -1011,83 +1093,57 @@ function Show-InitGitRepositoryUrlDialog {
             $pickerState.NextAzToken = $null
         }
 
-        $provKind = Get-ProviderKind
-        $pat = if (-not [string]::IsNullOrWhiteSpace($PatOverride)) { $PatOverride } else { Get-EffectivePat }
-        $org = $orgTextBox.Text.Trim()
-        $apiBase = $apiBaseTextBox.Text.Trim()
-
-        if ($provKind -eq 'AzureDevOps') {
-            if (-not $org) {
-                Set-Status -Text 'Enter your Azure DevOps organization.'
-                return
-            }
-            if ([string]::IsNullOrWhiteSpace($pat)) {
-                $pat = Resolve-AzureDevOpsPatForLoad
-                if ([string]::IsNullOrWhiteSpace($pat)) { return }
-            }
-        } elseif ([string]::IsNullOrWhiteSpace($pat)) {
-            Set-Status -Text 'Enter a token (or set GITHUB_TOKEN).'
-            return
-        }
-
         $gen = ++$pickerState.LoadGeneration
         $loadReposTopButton.IsEnabled = $false
         $loadMoreButton.IsEnabled = $false
         Set-Status -Text 'Loading repositories...'
 
-        $nextGh = $pickerState.NextGitHubUri
-        $nextAz = $pickerState.NextAzToken
+        $request = New-InitGitRepoListPageRequest -Provider $provKind -Pat $Pat -ApiBase $apiBaseTextBox.Text.Trim() `
+            -Organization $org -NextGitHubUri $pickerState.NextGitHubUri -NextAzToken $pickerState.NextAzToken
 
-        $task = [System.Threading.Tasks.Task]::Run({
-                Get-InitGitRepoListPage -Provider $provKind -Pat $pat -ApiBase $apiBase -Organization $org `
-                    -NextGitHubUri $nextGh -NextAzToken $nextAz
-            })
+        $null = Start-InitGitRepoListPageBackground -Request $request -Dispatcher $window.Dispatcher -OnComplete {
+            param($page)
+            Apply-InitGitRepoListPage -Page $page -Generation $gen
+        }
+    }
 
-        $null = $task.ContinueWith({
-                param($t)
-                $page = $null
-                if ($t.IsFaulted) {
-                    $err = $t.Exception.InnerException
-                    if (-not $err) { $err = $t.Exception }
-                    $page = @{ Ok = $false; Error = $err.Message; Repos = @() }
-                } else {
-                    $page = $t.Result
-                }
-                $window.Dispatcher.BeginInvoke([action]{
-                        if ($pickerState.LoadGeneration -ne $gen) { return }
+    function Invoke-LoadRepositories {
+        $providerCombo.SelectedItem = 'Azure DevOps'
+        Update-ProviderUi
+        $optionalExpander.IsExpanded = $true
+        Sync-ProviderFromUrl
 
-                        $loadReposTopButton.IsEnabled = $true
+        $typed = ''
+        try { $typed = $patBox.Password } catch { }
+        $provKind = Get-ProviderKind
+        $org = $orgTextBox.Text.Trim()
 
-                        if (-not $page.Ok) {
-                            Set-Status -Text $page.Error
-                            $loadMoreButton.IsEnabled = $false
-                            return
-                        }
+        $pat = Get-InitGitPatForRepoLoad -Provider $provKind -TypedPat $typed -Organization $org `
+            -OnStatus { param($msg) Set-Status -Text $msg } `
+            -OnPatAcquired { param($p) try { $patBox.Password = $p } catch { } }
 
-                        foreach ($r in $page.Repos) {
-                            $repoList.Add($r) | Out-Null
-                            [void]$repoCombo.Items.Add($r)
-                        }
-                        $pickerState.NextGitHubUri = $page.NextGitHubUri
-                        $pickerState.NextAzToken = $page.NextAzToken
-                        $hasMore = (-not [string]::IsNullOrWhiteSpace($pickerState.NextGitHubUri)) -or (-not [string]::IsNullOrWhiteSpace($pickerState.NextAzToken))
-                        $loadMoreButton.IsEnabled = $hasMore
-                        $count = @($page.Repos).Count
-                        $suffix = if ($hasMore) { ' Click Load more for the next page.' } else { '' }
-                        Set-Status -Text ("Loaded $count repositories.$suffix")
-                    }) | Out-Null
-            })
+        if ([string]::IsNullOrWhiteSpace($pat)) {
+            if ($provKind -eq 'GitHub') {
+                Set-Status -Text 'Enter a token (or set GITHUB_TOKEN).'
+            } elseif (-not $statusText.Text) {
+                Set-Status -Text 'A personal access token is required to load repositories.'
+            }
+            return
+        }
+
+        Begin-RepoListFetch -Append $false -Pat $pat
     }
 
     $loadReposTopButton.Add_Click({ Invoke-LoadRepositories })
 
     $loadMoreButton.Add_Click({
-            $pat = $null
-            if ((Get-ProviderKind) -eq 'AzureDevOps') {
-                $pat = Resolve-AzureDevOpsPatForLoad
-                if ([string]::IsNullOrWhiteSpace($pat)) { return }
-            }
-            Start-AsyncRepoLoad -Append $true -PatOverride $pat
+            $typed = ''
+            try { $typed = $patBox.Password } catch { }
+            $pat = Get-InitGitPatForRepoLoad -Provider (Get-ProviderKind) -TypedPat $typed -Organization $orgTextBox.Text.Trim() `
+                -OnStatus { param($msg) Set-Status -Text $msg } `
+                -OnPatAcquired { param($p) try { $patBox.Password = $p } catch { } }
+            if ([string]::IsNullOrWhiteSpace($pat)) { return }
+            Begin-RepoListFetch -Append $true -Pat $pat
         })
 
     $okButton.Add_Click({

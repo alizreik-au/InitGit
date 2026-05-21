@@ -60,6 +60,13 @@ REM One-time setup after clone: configures the "theirs" merge driver and post-me
 REM Run from repo root: scripts\setup-merge-driver.bat
 
 set DRIVER_CMD=scripts/merge-theirs.bat
+git config --local http.version HTTP/1.1
+if %ERRORLEVEL% neq 0 (
+  echo Failed to set http.version HTTP/1.1.
+  exit /b 1
+)
+echo Configured: http.version = HTTP/1.1
+
 git config merge.theirs.driver "%DRIVER_CMD%"
 if %ERRORLEVEL% neq 0 (
   echo Failed to set merge driver.
@@ -95,6 +102,102 @@ if %ERRORLEVEL% neq 0 (
   echo Pre-push hook already runs "git lfs push".
 )
 "@
+
+function Set-InitGitLocalHttpVersion {
+    <#
+    .SYNOPSIS
+        Sets [http] version = HTTP/1.1 in the repository .git/config (local scope).
+    #>
+    [OutputType([bool])]
+    param(
+        [switch]$Quiet
+    )
+    if (-not $Quiet) {
+        Write-Host 'Configuring Git for HTTP/1.1...'
+    }
+    git config --local http.version HTTP/1.1
+    if ($LASTEXITCODE -ne 0) {
+        if (-not $Quiet) {
+            Write-Host '  Warning: failed to set http.version HTTP/1.1' -ForegroundColor Yellow
+        }
+        return $false
+    }
+    if (-not $Quiet) {
+        Write-Host '  Configured: http.version = HTTP/1.1' -ForegroundColor Green
+    }
+    return $true
+}
+
+function Install-InitGitGitLfsInRepo {
+    <#
+    .SYNOPSIS
+        Runs git lfs install without failing when hooks already exist (common on re-run).
+    #>
+    [OutputType([hashtable])]
+    param()
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = @(git lfs install 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+            })
+        $text = ($out -join ' ').Trim()
+        if ($LASTEXITCODE -eq 0) {
+            return @{ Ok = $true; Message = 'Git LFS installed' }
+        }
+        if ($text -match 'Hook already exists') {
+            $null = @(git lfs install --skip-repo 2>&1 | Out-Null)
+            return @{
+                Ok      = $true
+                Message = 'Git LFS already configured (pre-push hook exists); applying InitGit hooks'
+            }
+        }
+        return @{ Ok = $false; Message = "git lfs install: $text" }
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+function Install-InitGitRepoHooks {
+    <#
+    .SYNOPSIS
+        Installs post-merge (lfs pull) and InitGit pre-push; backs up existing pre-push to pre-push.lfs when needed.
+    #>
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot
+    )
+    $gitDir = Join-Path -Path $RepoRoot -ChildPath '.git'
+    $hooksDir = Join-Path -Path $gitDir -ChildPath 'hooks'
+    $scriptsPrePush = Join-Path -Path $RepoRoot -ChildPath 'scripts\hooks\pre-push'
+    if (-not (Test-Path -LiteralPath $scriptsPrePush)) {
+        return $false
+    }
+
+    New-Item -Path $hooksDir -ItemType Directory -Force | Out-Null
+
+    $postMergeHook = Join-Path -Path $hooksDir -ChildPath 'post-merge'
+    if (Test-Path -LiteralPath $postMergeHook) {
+        $existing = Get-Content -LiteralPath $postMergeHook -Raw -ErrorAction SilentlyContinue
+        if ($existing -and ($existing -notmatch 'git lfs pull')) {
+            Add-Content -LiteralPath $postMergeHook -Value "`ngit lfs pull" -Encoding ASCII
+        }
+    } else {
+        Set-Content -LiteralPath $postMergeHook -Value "#!/bin/sh`ngit lfs pull" -Encoding ASCII -NoNewline:$false
+    }
+
+    $prePushHook = Join-Path -Path $hooksDir -ChildPath 'pre-push'
+    $prePushLfs = Join-Path -Path $hooksDir -ChildPath 'pre-push.lfs'
+    if (Test-Path -LiteralPath $prePushHook) {
+        $existing = Get-Content -LiteralPath $prePushHook -Raw -ErrorAction SilentlyContinue
+        $isInitGitHook = $existing -match 'git lfs push.*--all'
+        if (-not $isInitGitHook -and -not (Test-Path -LiteralPath $prePushLfs)) {
+            Copy-Item -LiteralPath $prePushHook -Destination $prePushLfs -Force
+        }
+    }
+    Copy-Item -LiteralPath $scriptsPrePush -Destination $prePushHook -Force
+    return $true
+}
 
 function Get-RepoNameFromUrl {
     [OutputType([string])]

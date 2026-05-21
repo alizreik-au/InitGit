@@ -98,12 +98,13 @@ try {
         Set-Content -LiteralPath (Join-Path $hooksDir 'pre-push') -Value $PrePushHookContent -Encoding ASCII -NoNewline:$false
         Write-InitGitLog "Generated: scripts\merge-theirs.bat, setup-merge-driver.bat, hooks\pre-push" -Level Ok
 
-        # Git LFS
-        $lfsResult = git lfs install 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-InitGitLog "git lfs install failed: $lfsResult" -Level Warn
+        Set-InitGitLocalHttpVersion | Out-Null
+
+        $lfs = Install-InitGitGitLfsInRepo
+        if ($lfs.Ok) {
+            Write-InitGitLog $lfs.Message -Level Ok
         } else {
-            Write-InitGitLog "Git LFS installed" -Level Ok
+            Write-InitGitLog $lfs.Message -Level Warn
         }
 
         # Merge driver
@@ -114,14 +115,11 @@ try {
             Write-InitGitLog "Failed to set merge driver" -Level Warn
         }
 
-        # Hooks
-        $gitDir = Join-Path -Path $repoRoot -ChildPath '.git'
-        $postMergeHook = Join-Path -Path $gitDir -ChildPath 'hooks\post-merge'
-        $prePushHook = Join-Path -Path $gitDir -ChildPath 'hooks\pre-push'
-        $postMergeContent = "#!/bin/sh`ngit lfs pull"
-        Set-Content -LiteralPath $postMergeHook -Value $postMergeContent -Encoding ASCII -NoNewline:$false
-        Copy-Item -LiteralPath (Join-Path $hooksDir 'pre-push') -Destination $prePushHook -Force
-        Write-InitGitLog "Hooks: .git/hooks/post-merge, .git/hooks/pre-push" -Level Ok
+        if (Install-InitGitRepoHooks -RepoRoot $repoRoot) {
+            Write-InitGitLog "Hooks: .git/hooks/post-merge, .git/hooks/pre-push" -Level Ok
+        } else {
+            Write-InitGitLog "Could not install hooks (scripts\hooks\pre-push missing)" -Level Warn
+        }
 
         Write-InitGitLog "Done. Repo updated: $repoRoot" -Level Ok
     } finally {

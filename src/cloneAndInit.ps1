@@ -183,6 +183,8 @@ try {
 
     Push-Location -LiteralPath $clonePath
     try {
+        Set-InitGitLocalHttpVersion | Out-Null
+
         git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
         if ($LASTEXITCODE -eq 0) {
             git fetch origin
@@ -211,9 +213,11 @@ try {
     # Git LFS and merge driver / hooks
     Push-Location -LiteralPath $clonePath
     try {
-        git lfs install
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Warning: git lfs install failed. LFS may not be active." -ForegroundColor Yellow
+        $lfs = Install-InitGitGitLfsInRepo
+        if ($lfs.Ok) {
+            Write-Host "  $($lfs.Message)" -ForegroundColor Green
+        } else {
+            Write-Host "  Warning: $($lfs.Message)" -ForegroundColor Yellow
         }
 
         git config merge.theirs.driver "scripts/merge-theirs.bat"
@@ -223,13 +227,11 @@ try {
             Write-Host "  Configured: merge driver 'theirs'" -ForegroundColor Green
         }
 
-        $gitDir = Join-Path -Path $clonePath -ChildPath '.git'
-        $postMergeHook = Join-Path -Path $gitDir -ChildPath 'hooks\post-merge'
-        $prePushHook = Join-Path -Path $gitDir -ChildPath 'hooks\pre-push'
-        $postMergeContent = "#!/bin/sh`ngit lfs pull"
-        Set-Content -LiteralPath $postMergeHook -Value $postMergeContent -Encoding ASCII -NoNewline:$false
-        Copy-Item -LiteralPath (Join-Path -Path $hooksDir -ChildPath 'pre-push') -Destination $prePushHook -Force
-        Write-Host "  Generated: .git/hooks/post-merge, .git/hooks/pre-push (LFS pull/push)" -ForegroundColor Green
+        if (Install-InitGitRepoHooks -RepoRoot $clonePath) {
+            Write-Host "  Generated: .git/hooks/post-merge, .git/hooks/pre-push (LFS pull/push)" -ForegroundColor Green
+        } else {
+            Write-Host "  Warning: could not install hooks." -ForegroundColor Yellow
+        }
     } finally {
         Pop-Location
     }

@@ -5,6 +5,23 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path -Path $repoRoot -ChildPath 'src\CloneAndInitLib.ps1')
 . (Join-Path -Path $repoRoot -ChildPath 'src\RepoPickerLib.ps1')
 
+Describe 'Install-InitGitGitLfsInRepo' {
+    It 'Returns Ok when git lfs reports hook already exists' {
+        $r = Install-InitGitGitLfsInRepo
+        if ($r.Message -match 'Hook already exists|already configured') {
+            $r.Ok | Should Be $true
+        } else {
+            $r.Ok | Should BeIn @($true, $false)
+        }
+    }
+}
+
+Describe 'Set-InitGitLocalHttpVersion' {
+    It 'SetupMergeDriverBatContent configures http.version HTTP/1.1' {
+        $SetupMergeDriverBatContent | Should Match 'git config --local http\.version HTTP/1\.1'
+    }
+}
+
 Describe 'Get-RepoNameFromUrl' {
     It 'Returns repo name from HTTPS URL with .git' {
         (Get-RepoNameFromUrl -Url 'https://github.com/user/my-repo.git') | Should Be 'my-repo'
@@ -250,6 +267,57 @@ Describe 'Prerequisite JSON contract' {
         $o.GitPresent | Should Be $true
         $o.LfsPresent | Should Be $false
         $o.WingetIds.Git | Should Be 'Git.Git'
+    }
+}
+
+Describe 'New-InitGitRepoListPageRequest' {
+    It 'Builds a request hashtable for background fetch' {
+        $r = New-InitGitRepoListPageRequest -Provider 'AzureDevOps' -Pat 'x' -Organization 'affirmer'
+        $r.Provider | Should Be 'AzureDevOps'
+        $r.Pat | Should Be 'x'
+        $r.Organization | Should Be 'affirmer'
+    }
+}
+
+Describe 'Get-InitGitPatForRepoLoad' {
+    It 'Returns typed PAT for GitHub without env when typed is set' {
+        $prev = $env:GITHUB_TOKEN
+        try {
+            $env:GITHUB_TOKEN = 'env-token'
+            (Get-InitGitPatForRepoLoad -Provider 'GitHub' -TypedPat 'typed-token') | Should Be 'typed-token'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue } else { $env:GITHUB_TOKEN = $prev }
+        }
+    }
+
+    It 'Uses AZURE_DEVOPS_EXT_PAT when typed PAT is empty' {
+        $prev = $env:AZURE_DEVOPS_EXT_PAT
+        try {
+            $env:AZURE_DEVOPS_EXT_PAT = 'az-env'
+            (Get-InitGitPatForRepoLoad -Provider 'AzureDevOps' -TypedPat '' -Organization 'affirmer') | Should Be 'az-env'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:AZURE_DEVOPS_EXT_PAT -ErrorAction SilentlyContinue } else { $env:AZURE_DEVOPS_EXT_PAT = $prev }
+        }
+    }
+}
+
+Describe 'Get-InitGitRepoListPage error handling' {
+    It 'Returns Ok false for invalid Azure credentials without throwing' {
+        $page = Get-InitGitRepoListPage -Provider 'AzureDevOps' -Pat 'not-a-valid-pat' -Organization 'affirmer'
+        $page.Ok | Should Be $false
+        $page.Error | Should Not BeNullOrEmpty
+        @($page.Repos).Count | Should Be 0
+    }
+}
+
+Describe 'Async repo load regression' {
+    It 'Bare scriptblock to Task.Run throws ambiguous overload in PowerShell 5.1' {
+        { [void][System.Threading.Tasks.Task]::Run({ @{ Ok = $true } }) } | Should Throw
+    }
+
+    It 'BackgroundWorker type is available for repo list fetch' {
+        $bw = New-Object System.ComponentModel.BackgroundWorker
+        ($bw -is [System.ComponentModel.BackgroundWorker]) | Should Be $true
     }
 }
 

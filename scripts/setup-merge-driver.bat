@@ -3,6 +3,13 @@ REM One-time setup after clone: configures the "theirs" merge driver and post-me
 REM Run from repo root: scripts\setup-merge-driver.bat
 
 set DRIVER_CMD=scripts/merge-theirs.bat
+git config --local http.version HTTP/1.1
+if %ERRORLEVEL% neq 0 (
+  echo Failed to set http.version HTTP/1.1.
+  exit /b 1
+)
+echo Configured: http.version = HTTP/1.1
+
 git config merge.theirs.driver "%DRIVER_CMD%"
 if %ERRORLEVEL% neq 0 (
   echo Failed to set merge driver.

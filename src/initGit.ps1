@@ -35,8 +35,7 @@ try {
     Write-Host "Adding Git remote..."
     & git remote add origin -- $userInput
 
-    Write-Host "Configuring Git for HTTP/1.1..."
-    git config --local http.version HTTP/1.1
+    Set-InitGitLocalHttpVersion | Out-Null
 
     Write-Host "Installing Git LFS..."
     git lfs install

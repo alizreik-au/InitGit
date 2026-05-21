@@ -74,6 +74,8 @@ try {
             Write-Host "  Warning: failed to add remote origin." -ForegroundColor Yellow
         }
 
+        Set-InitGitLocalHttpVersion | Out-Null
+
         $scriptsDir = Join-Path -Path $repoRoot -ChildPath 'scripts'
         $hooksDir = Join-Path -Path $scriptsDir -ChildPath 'hooks'
         New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
@@ -84,9 +86,11 @@ try {
         Set-Content -LiteralPath (Join-Path -Path $hooksDir -ChildPath 'pre-push') -Value $PrePushHookContent -Encoding ASCII -NoNewline:$false
         Write-Host "  Generated: scripts\merge-theirs.bat, scripts\setup-merge-driver.bat, scripts\hooks\pre-push" -ForegroundColor Green
 
-        git lfs install
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Warning: git lfs install failed. LFS may not be active." -ForegroundColor Yellow
+        $lfs = Install-InitGitGitLfsInRepo
+        if ($lfs.Ok) {
+            Write-Host "  $($lfs.Message)" -ForegroundColor Green
+        } else {
+            Write-Host "  Warning: $($lfs.Message)" -ForegroundColor Yellow
         }
 
         git config merge.theirs.driver "scripts/merge-theirs.bat"
@@ -96,12 +100,11 @@ try {
             Write-Host "  Warning: failed to set merge driver." -ForegroundColor Yellow
         }
 
-        $postMergeHook = Join-Path -Path $gitDir -ChildPath 'hooks\post-merge'
-        $prePushHook = Join-Path -Path $gitDir -ChildPath 'hooks\pre-push'
-        $postMergeContent = "#!/bin/sh`ngit lfs pull"
-        Set-Content -LiteralPath $postMergeHook -Value $postMergeContent -Encoding ASCII -NoNewline:$false
-        Copy-Item -LiteralPath (Join-Path -Path $hooksDir -ChildPath 'pre-push') -Destination $prePushHook -Force
-        Write-Host "  Generated: .git/hooks/post-merge, .git/hooks/pre-push" -ForegroundColor Green
+        if (Install-InitGitRepoHooks -RepoRoot $repoRoot) {
+            Write-Host "  Generated: .git/hooks/post-merge, .git/hooks/pre-push" -ForegroundColor Green
+        } else {
+            Write-Host "  Warning: could not install hooks." -ForegroundColor Yellow
+        }
 
         Write-Host ""
         Write-Host "Done. Repo initialized: $repoRoot" -ForegroundColor Green
